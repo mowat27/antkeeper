@@ -41,3 +41,17 @@ def execute(cmd: list[str]) -> str:
     if result.returncode != 0:
         raise GitCommandError(result.stderr.strip())
     return result.stdout.strip()
+
+
+def latest_commit() -> dict:
+    """Return the SHA and message of the most recent commit.
+
+    Uses a unit-separator delimiter to safely parse commit messages that
+    may contain quotes or special characters.
+
+    Returns:
+        A dict with "sha" and "message" keys.
+    """
+    output = execute(["log", "-1", "--pretty=format:%H\x1f%s"])
+    sha, _, message = output.partition("\x1f")
+    return {"sha": sha, "message": message}

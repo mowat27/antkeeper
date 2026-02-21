@@ -94,3 +94,22 @@ class ClaudeCodeAgent:
         logger.info(f"LLM response received (length={len(result.stdout)} chars)")
         logger.debug(f"LLM response content: {result.stdout}")
         return result.stdout
+
+
+def run_prompt(prompt: str, logger: logging.Logger, model: str | None = None) -> str:
+    """Execute a prompt via ClaudeCodeAgent and return the response.
+
+    Convenience wrapper that creates an agent with yolo=True, sends the prompt,
+    and returns the response string.
+
+    Args:
+        prompt: The prompt string to send.
+        logger: Logger for caller-level context.
+        model: Optional model identifier passed to the agent.
+
+    Returns:
+        The agent's response string.
+    """
+    logger.debug(f"run_prompt called (prompt length={len(prompt)} chars)")
+    agent = ClaudeCodeAgent(model=model, yolo=True)
+    return agent.prompt(prompt)

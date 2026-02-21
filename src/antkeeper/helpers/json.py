@@ -8,6 +8,27 @@ is common in LLM outputs.
 import json as _json
 
 
+def json_prompt(prompt: str, *, required_fields: list[str]) -> str:
+    """Append JSON output instructions and an example object to a prompt.
+
+    Builds an example JSON object from the required field names and appends
+    instructions telling the LLM to respond with only a JSON object.
+
+    Args:
+        prompt: The original prompt text.
+        required_fields: Field names that must appear in the JSON response.
+
+    Returns:
+        The prompt with JSON instructions appended.
+    """
+    example = {field: f"<{field}>" for field in required_fields}
+    return (
+        f"{prompt}\n\n"
+        f"After running the command, return ONLY a JSON object: "
+        f"{_json.dumps(example)}"
+    )
+
+
 def extract_json(text: str) -> dict:
     """Extract and parse a JSON object from text that may contain markdown fencing or prose.
 

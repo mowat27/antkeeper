@@ -7,6 +7,6 @@ Exports:
     extract_json: Extract and parse JSON from text with markdown or prose.
 """
 
-from antkeeper.helpers.json import extract_json
+from antkeeper.helpers.json import extract_json, json_prompt
 
-__all__ = ["extract_json"]
+__all__ = ["extract_json", "json_prompt"]
