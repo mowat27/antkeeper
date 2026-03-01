@@ -238,3 +238,136 @@ class TestAppEnvironment:
         with pytest.raises(RuntimeError):
             runner.run()
         assert key not in os.environ
+
+    def test_callable_env_value_resolved_before_handler(self):
+        key = f"{_ENV_PREFIX}CALLABLE"
+        app = _make_env_app(env={key: lambda runner: "computed"})
+
+        def read_env(runner, state):
+            return {**state, "val": os.environ[key]}
+
+        result = _run_handler(app, read_env)
+        assert result["val"] == "computed"
+
+    def test_mixed_callable_and_static_env(self):
+        key_a = f"{_ENV_PREFIX}STATIC"
+        key_b = f"{_ENV_PREFIX}DYNAMIC"
+        app = _make_env_app(env={key_a: "static", key_b: lambda runner: "dynamic"})
+
+        def read_env(runner, state):
+            return {**state, "a": os.environ[key_a], "b": os.environ[key_b]}
+
+        result = _run_handler(app, read_env)
+        assert result["a"] == "static"
+        assert result["b"] == "dynamic"
+
+    def test_callable_env_receives_runner_properties(self):
+        key = f"{_ENV_PREFIX}RUNID"
+        app = _make_env_app(env={key: lambda runner: runner.id})
+
+        def read_env(runner, state):
+            return {**state, "env_val": os.environ[key], "run_id": runner.id}
+
+        result = _run_handler(app, read_env)
+        assert result["env_val"] == result["run_id"]
+
+    def test_callable_env_restored_after_run(self):
+        key = f"{_ENV_PREFIX}CALLABLE_RESTORE"
+        os.environ.pop(key, None)
+        app = _make_env_app(env={key: lambda runner: "temp_value"})
+
+        def noop(runner, state):
+            return state
+
+        _run_handler(app, noop)
+        assert key not in os.environ
+
+    def test_callable_env_that_raises_propagates(self):
+        key = f"{_ENV_PREFIX}CALLABLE_ERR"
+        os.environ.pop(key, None)
+
+        def bad_callable(runner):
+            raise ValueError("callable failed")
+
+        app = _make_env_app(env={key: bad_callable})
+
+        def noop(runner, state):
+            return state
+
+        app.add_handler(noop)
+        channel = _SimpleChannel("noop")
+        runner = Runner(app, channel)
+        with pytest.raises(ValueError, match="callable failed"):
+            runner.run()
+        assert key not in os.environ
+
+    def test_env_with_no_callables_unchanged(self):
+        key = f"{_ENV_PREFIX}PLAIN"
+        app = _make_env_app(env={key: "plain_value"})
+
+        def read_env(runner, state):
+            return {**state, "val": os.environ[key]}
+
+        result = _run_handler(app, read_env)
+        assert result["val"] == "plain_value"
+
+
+class TestCallableLogDir:
+    """Tests for callable log_dir support in App."""
+
+    def test_callable_log_dir_resolves_with_runner(self):
+        base = tempfile.mkdtemp()
+        app = App(
+            log_dir=lambda runner: os.path.join(base, runner.id),
+            worktree_dir=tempfile.mkdtemp(),
+            state_dir=tempfile.mkdtemp(),
+        )
+
+        def noop(runner, state):
+            return state
+
+        app.add_handler(noop)
+        channel = _SimpleChannel("noop")
+        runner = Runner(app, channel)
+        # The resolved log dir should exist and contain the runner ID
+        resolved_dir = os.path.join(base, runner.id)
+        assert os.path.isdir(resolved_dir)
+        # Should have a log file in it
+        log_files = os.listdir(resolved_dir)
+        assert len(log_files) == 1
+        assert log_files[0].endswith(".log")
+
+    def test_static_log_dir_still_works(self):
+        log_dir = tempfile.mkdtemp()
+        app = App(
+            log_dir=log_dir,
+            worktree_dir=tempfile.mkdtemp(),
+            state_dir=tempfile.mkdtemp(),
+        )
+
+        def noop(runner, state):
+            return state
+
+        app.add_handler(noop)
+        channel = _SimpleChannel("noop")
+        Runner(app, channel)
+        log_files = [f for f in os.listdir(log_dir) if f.endswith(".log")]
+        assert len(log_files) == 1
+
+    def test_callable_log_dir_that_raises_propagates(self):
+        def bad_log_dir(runner):
+            raise RuntimeError("cannot compute log dir")
+
+        app = App(
+            log_dir=bad_log_dir,
+            worktree_dir=tempfile.mkdtemp(),
+            state_dir=tempfile.mkdtemp(),
+        )
+
+        def noop(runner, state):
+            return state
+
+        app.add_handler(noop)
+        channel = _SimpleChannel("noop")
+        with pytest.raises(RuntimeError, match="cannot compute log dir"):
+            Runner(app, channel)

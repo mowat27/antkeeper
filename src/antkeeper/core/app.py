@@ -75,25 +75,33 @@ class App:
 
     Attributes:
         handlers: Dictionary mapping handler names to their functions.
-        log_dir: Directory path where Runner instances will write log files.
+        log_dir: Directory path where Runner instances will write log files, or
+            a callable that accepts a Runner and returns the path. Resolved once
+            per Runner at initialization time.
         worktree_dir: Directory path where git worktrees will be created.
         state_dir: Directory path where Runner instances will write state files.
-        env: Optional dict of environment variable names to values that will be
-            temporarily applied to os.environ for each handler invocation.
+        env: Optional dict of environment variable names to values. Values may
+            be callables that accept a Runner and return the resolved value.
+            Callables are evaluated per-handler invocation with the active
+            Runner passed as the argument, then applied to os.environ for the
+            duration of that invocation and restored afterward.
     """
-    def __init__(self, log_dir: str = "agents/logs/", worktree_dir: str = "trees/", state_dir: str = ".antkeeper/state/", env: dict[str, Any] | None = None, handlers: dict[str, Callable] | None = None) -> None:
+    def __init__(self, log_dir: str | Callable[[Runner], str] = "agents/logs/", worktree_dir: str = "trees/", state_dir: str = ".antkeeper/state/", env: dict[str, Any | Callable[[Runner], Any]] | None = None, handlers: dict[str, Callable] | None = None) -> None:
         """Initialize a new App instance.
 
         Creates an empty handler registry and sets directory paths for logs,
         worktrees, and state files that will be used by Runner instances.
 
         Args:
-            log_dir: Directory for log files. Defaults to "agents/logs/".
+            log_dir: Directory for log files, or a callable accepting (runner)
+                that returns the directory path. Defaults to "agents/logs/".
             worktree_dir: Directory for git worktrees. Defaults to "trees/".
             state_dir: Directory for state files. Defaults to ".antkeeper/state/".
-            env: Optional dict of environment variable names to values. When set,
-                these are exported to os.environ before each handler runs and
-                restored afterward. Values are converted to str().
+            env: Optional dict of environment variable names to values. Values
+                may be callables accepting (runner) that return the value.
+                When set, values are resolved per handler invocation, exported
+                to os.environ before each handler runs, and restored afterward.
+                Static values are converted to str().
             handlers: Optional dict of pre-registered handlers to merge in.
         """
         self.handlers = {}

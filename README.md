@@ -101,7 +101,7 @@ src/antkeeper/
 
 - **State** (`dict[str, Any]`) — All workflow data flows as a flat dictionary. Handlers receive and return `State`; the `Runner` injects `run_id` and `workflow_name`. State is automatically persisted as JSON on every change.
 - **Channel** (Protocol) — I/O boundary adapter. Owns how progress/errors are reported and what initial state is supplied. This is the primary extension point for new I/O adapters.
-- **App** — Handler registry. Use the `@app.handler` decorator to register workflow steps by function name. Configure log, worktree, and state directories via `App(log_dir="...", worktree_dir="...", state_dir="...")`. Optionally supply `env={"KEY": value}` to inject environment variables for every handler run (values are converted to `str()`).
+- **App** — Handler registry. Use the `@app.handler` decorator to register workflow steps by function name. Configure log, worktree, and state directories via `App(log_dir="...", worktree_dir="...", state_dir="...")`. `log_dir` may be a callable `(runner) -> str` for per-handler dynamic paths. Optionally supply `env={"KEY": value}` to inject environment variables for every handler run (values are converted to `str()`). `env` values may also be callables `(runner) -> Any` evaluated per handler invocation.
 - **Runner** — Execution engine. Binds an `App` + `Channel`, generates a `run_id`, and drives the workflow lifecycle. Persists state to `{timestamp}-{run_id}.json` in `app.state_dir`.
 - **run_workflow** — Composition helper. Folds state through a list of handler callables, enabling composite workflows without inheritance or a DAG scheduler.
 - **Agent** (Protocol) — LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. Extension point for new LLM backends.
@@ -155,6 +155,10 @@ app = App()  # Defaults: log_dir="agents/logs/", worktree_dir="trees/", state_di
 #   - Values are converted to str() before setting on os.environ
 #   - Original values are restored after each handler completes (success or failure)
 #   - Keys absent from os.environ before are removed after handler completes (not set to "None")
+#   - Values may be callables: App(env={"RUN_ID": lambda runner: runner.id})
+#     The callable receives the runner and is evaluated per handler invocation
+# log_dir may also be a callable: App(log_dir=lambda runner: f"logs/{runner.workflow_name}/{runner.id}")
+#   - Evaluated once per handler invocation, before the log file is created
 
 @app.handler
 def my_step(runner: Runner, state: State) -> State:
@@ -260,7 +264,7 @@ The framework creates a log file and state file for each workflow run:
 - **Log file**: `{log_dir}/{timestamp}-{run_id}.log` (default: `agents/logs/`)
 - **State file**: `{state_dir}/{timestamp}-{run_id}.json` (default: `.antkeeper/state/`)
 
-Configure via `App(log_dir="path/", state_dir="path/")`. File naming ensures correlation between logs and state.
+Configure via `App(log_dir="path/", state_dir="path/")`. `log_dir` may be a callable `(runner) -> str` for per-handler dynamic directories (e.g. `lambda runner: f"logs/{runner.workflow_name}/{runner.id}"`). File naming ensures correlation between logs and state.
 
 Logs capture framework lifecycle events (runner init, workflow start/complete), handler execution (step names, state keys at DEBUG level), and errors. State is persisted as JSON after initial creation, after each `run_workflow()` step, and after final handler return.
 
