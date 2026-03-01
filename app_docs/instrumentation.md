@@ -96,7 +96,35 @@ The framework provides file-based Python logging via the `Runner`. Each workflow
 ```python
 app = App(log_dir="my/logs/")  # custom directory
 app = App()                     # defaults to "agents/logs/"
+
+# log_dir may also be a callable that receives the runner and returns a string.
+# The callable is evaluated once per handler invocation, before the log file is created.
+app = App(log_dir=lambda runner: f"logs/{runner.workflow_name}/{runner.id}")
 ```
+
+When `log_dir` is a callable it is resolved inside `Runner.__init__`, so `runner.id` and `runner.channel` (including `runner.workflow_name`) are available. State is not yet available at that point — `log_dir` is infrastructure set up before the handler runs.
+
+Static string values continue to work identically to current behaviour.
+
+### Callable env Values
+
+Values in the `env` dict passed to `App(env={...})` may also be callables. Each callable receives the `runner` and is evaluated immediately before the handler runs (inside `Runner.run()`), so `runner.id`, `runner.workflow_name`, and the full `runner.channel` are available. State is not passed — env resolution happens before state is processed by the handler.
+
+```python
+# Static env vars (existing behaviour — unchanged)
+app = App(env={"API_KEY": "sk-123", "TIMEOUT": 30})
+
+# Callable env vars — resolved per handler invocation
+app = App(env={
+    "STATIC_KEY": "always-this",
+    "RUN_ID": lambda runner: runner.id,
+    "LOG_PATH": lambda runner: f"logs/{runner.id}.log",
+})
+```
+
+Mixed dicts (some static, some callable values) are supported. The save/restore lifecycle is the same as for static values: env vars are set before the handler runs and restored (or removed) after it returns, whether it succeeds or raises.
+
+Errors raised by callable values propagate immediately; the `finally` block in `_app_env` still restores any variables that were already set.
 
 ### Per-Run Log Files
 

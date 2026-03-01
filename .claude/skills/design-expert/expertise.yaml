@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-02-12
+# Last validated: 2026-03-01
 
 overview:
   name: antkeeper
@@ -192,21 +192,44 @@ core_objects:
   App:
     file: src/antkeeper/core/app.py
     responsibility: Handler registry keyed by function name.
-    construction: "App(log_dir: str = 'agents/logs/', worktree_dir: str = 'trees/', state_dir: str = '.antkeeper/state/')"
+    construction: "App(log_dir: str | Callable[[Runner], str] = 'agents/logs/', worktree_dir: str = 'trees/', state_dir: str = '.antkeeper/state/', env: dict[str, Any | Callable[[Runner], Any]] | None = None, handlers: dict[str, Callable] | None = None)"
     attributes:
       - "handlers: dict  # name -> fn mapping"
-      - "log_dir: str  # directory for per-run log files"
+      - "log_dir: str | Callable[[Runner], str]  # directory for per-run log files, or a callable accepting (runner) that returns the path"
       - "worktree_dir: str  # directory for git worktrees"
       - "state_dir: str  # directory for per-run state JSON files"
+      - "env: dict[str, Any | Callable[[Runner], Any]] | None  # optional env vars; values may be callables accepting (runner) returning the value"
     interface:
       - "handler(fn) -> wrapper  # decorator that registers fn by fn.__name__"
+      - "add_handler(fn) -> None  # programmatic alternative to @app.handler decorator"
       - "get_handler(name) -> Callable[[Runner, State], State | NoReturn]"
     design_constraint: >
-      get_handler raises ValueError for unknown names. The decorator stores
-      the original fn (not the wrapper) in self.handlers. log_dir is passed
-      to Runner for per-run file logging. worktree_dir is used by handlers
-      (e.g. sdlc_iso) to locate worktree base directories. state_dir is
-      passed to Runner for per-run state JSON persistence.
+      get_handler raises ValueError for unknown names. The decorator and add_handler()
+      both store the original fn in self.handlers. handlers constructor param merges
+      pre-registered handlers at construction time. log_dir can be a callable accepting
+      (runner) — resolved by Runner.__init__ at construction time. env values can be
+      callables accepting (runner) — resolved by Runner.run() before passing to _app_env.
+      Callable resolution happens per-run so values like runner.id are available. env is
+      consumed by Runner.run() via _app_env context manager — not applied by App itself.
+      Thread-safety note: env vars are process-global; concurrent Runner instances in the
+      same process could conflict (acceptable for current single-threaded execution model).
+
+  _app_env:
+    file: src/antkeeper/core/app.py
+    signature: "_app_env(env: dict[str, Any] | None) -> Generator[None]"
+    kind: contextmanager (module-level, private)
+    responsibility: >
+      Temporarily injects env vars into os.environ for the duration of a with-block,
+      then restores original values in a finally block. No-op if env is None or {}.
+      Values are converted via str() before being set. Keys absent from os.environ
+      before the block are deleted (not set to None) on restore. Callable env values
+      are already resolved by Runner.run() before _app_env is called — _app_env only
+      sees plain values. Not exported from __init__.py — implementation detail.
+    behavior:
+      - "If not env: yield immediately (no-op)"
+      - "Save originals: {k: os.environ.get(k) for k in env}"
+      - "Set each: os.environ[k] = str(v) — str() failures propagate immediately"
+      - "finally: restore originals or pop if original was None"
 
   Runner:
     file: src/antkeeper/core/runner.py
@@ -229,15 +252,19 @@ core_objects:
       - "report_error(message) -> None  # logs then delegates to channel"
       - "fail(message) -> NoReturn  # logs, raises WorkflowFailedError"
     design_constraint: >
-      Runner.__init__ creates log dir (app.log_dir) and state dir (app.state_dir),
-      sets up a FileHandler writing to <log_dir>/<YYYYMMDDHHMMSS>-<id>.log and
-      a state file at <state_dir>/<YYYYMMDDHHMMSS>-<id>.json. Logger propagate=False
-      to avoid console output. run() persists state before and after workflow
+      Runner.__init__ resolves app.log_dir — if callable, calls log_dir(self) to
+      get the path; otherwise uses the string directly. Creates log dir and state
+      dir (app.state_dir), sets up a FileHandler writing to
+      <log_dir>/<YYYYMMDDHHMMSS>-<id>.log and a state file at
+      <state_dir>/<YYYYMMDDHHMMSS>-<id>.json. Logger propagate=False to avoid
+      console output. run() resolves callable env values: if app.env is non-empty,
+      iterates values calling v(self) for callables and keeping static values,
+      producing a resolved dict passed to _app_env(). Callable errors propagate
+      before _app_env is entered. run() persists state before and after workflow
       execution via _persist_state(). run_workflow() also calls _persist_state()
-      after each step completes, enabling mid-workflow state recovery. run() wraps
-      workflow call in try/except to log errors before re-raising. fail() raises
-      WorkflowFailedError instead of calling exit(1) — this allows CLI and API
-      to handle failures differently (CLI exits, API continues serving).
+      after each step completes, enabling mid-workflow state recovery. fail()
+      raises WorkflowFailedError instead of calling exit(1) — this allows CLI
+      and API to handle failures differently (CLI exits, API continues serving).
 
   run_workflow:
     file: src/antkeeper/core/app.py
@@ -717,7 +744,8 @@ testing_design:
   test_structure: >
     Tests organized into subdirectories mirroring src layout.
   test_files:
-    - tests/core/test_workflows.py — core engine paths (single, multi-step, failure raises WorkflowFailedError, unknown)
+    - tests/core/test_app.py — App constructor tests (handlers param, add_handler, env param storage and defaults)
+    - tests/core/test_workflows.py — core engine paths (single, multi-step, failure raises WorkflowFailedError, unknown) + TestAppEnvironment class (env var setting, str conversion, restoration after success/failure, existing var preservation, noop for None/empty, invalid str propagation, run_workflow step visibility, callable env values resolved with runner, mixed callable/static env, callable errors propagate) + TestCallableLogDir class (callable log_dir resolves with runner, static still works, callable errors propagate)
     - tests/core/test_logging.py — per-run file logging, App config (log_dir, worktree_dir, state_dir defaults)
     - tests/core/test_state_persistence.py — state file creation, naming format, content, per-step persistence, log/state filename correlation
     - tests/channels/test_cli_channel.py — CliChannel initial_state and attribute tests
@@ -815,6 +843,18 @@ key_design_decisions:
     Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS)
     read from environment at request time. python-dotenv loads .env file in
     create_app(). .env is gitignored.
+  - >
+    App-level environment variable injection. App(env={...}) declares env vars
+    that are set on os.environ before each handler run and restored afterward
+    (success or failure). Values can be static (converted via str()) or callables
+    accepting (runner) that return the value — enabling per-run values like
+    runner.id. Runner.run() resolves callables before passing to _app_env. The
+    _app_env context manager in app.py handles the actual set/restore; it only
+    sees resolved values. run_workflow() is NOT modified — env vars flow through
+    from Runner.run() and are visible to all steps. App.log_dir also supports
+    callables accepting (runner) — resolved by Runner.__init__. Not thread-safe
+    (os.environ is process-global), acceptable for current single-threaded model.
+    _app_env is private and not exported from __init__.py.
   - >
     Automatic state persistence. Runner persists state as JSON to
     <state_dir>/<timestamp>-<id>.json at key lifecycle points: before

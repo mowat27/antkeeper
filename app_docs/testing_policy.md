@@ -49,6 +49,7 @@ Focus on:
 - Multi-step workflow composition via `run_workflow()`
 - Error propagation (WorkflowFailedError)
 - Handler resolution (unknown workflow names)
+- Environment variable lifecycle (`App(env=...)`: setting, str conversion, restoration, error propagation)
 
 Avoid testing:
 - Handler business logic (that's app code, not framework code)
@@ -232,6 +233,27 @@ def test_something(app, runner_factory):
     # Worktrees go to app.worktree_dir (temp directory)
     # State files go to app.state_dir (temp directory)
 ```
+
+### App Environment Variable Testing Patterns
+
+Tests for the `App(env=...)` feature live in `tests/core/test_workflows.py` in the `TestAppEnvironment` class, alongside the workflow execution tests. Constructor-level tests (`test_app_constructor_stores_env`, `test_app_constructor_default_env_is_none`) live in `tests/core/test_app.py`.
+
+Because these tests manipulate `os.environ` directly, they use a prefixed key convention (`_ANTKEEPER_TEST_ENV_*`) to avoid colliding with real environment variables. Each test cleans up after itself.
+
+The `TestAppEnvironment` class uses its own helpers (`_make_env_app`, `_run_handler`, `_SimpleChannel`) rather than the shared `runner_factory` fixture, because the env tests need precise control over the `App` constructor arguments and don't benefit from the shared fixture's defaults.
+
+Tests cover:
+
+- `test_handler_sees_env_vars` — Handler reads an env var set via `App(env=...)` and finds the expected value
+- `test_env_values_converted_to_string` — Integer values (e.g., `42`) are converted to `"42"` before being set on `os.environ`
+- `test_env_restored_after_successful_handler` — Key is absent from `os.environ` after handler completes successfully
+- `test_env_restored_after_failed_handler` — Key is absent from `os.environ` even when the handler raises
+- `test_existing_env_var_preserved` — A key already in `os.environ` is overridden during handler execution and its original value is restored afterward
+- `test_none_env_is_noop` — `App(env=None)` runs handlers without touching `os.environ`
+- `test_empty_env_dict_is_noop` — `App(env={})` runs handlers without touching `os.environ`
+- `test_invalid_env_value_propagates` — An object whose `__str__` raises causes the exception to propagate; any partially-set vars are cleaned up
+- `test_run_workflow_steps_see_env_vars` — Steps inside `run_workflow()` can access env vars set at `Runner.run()` level
+- `test_env_restored_after_run_workflow_step_failure` — Env vars are cleaned up even when a step inside `run_workflow()` raises
 
 ### State Persistence Testing Patterns
 

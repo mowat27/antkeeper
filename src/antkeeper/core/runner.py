@@ -5,6 +5,7 @@ registry) and a Channel (I/O boundary). It manages the workflow lifecycle:
 - Generates unique run IDs
 - Sets up per-run file logging
 - Injects run_id and workflow_name into state
+- Applies app-level environment variables around each handler invocation
 - Invokes workflow handlers
 - Provides progress/error reporting utilities
 - Handles workflow failures
@@ -22,7 +23,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, NoReturn
 
 from antkeeper.core.domain import State, Channel, WorkflowFailedError
-from antkeeper.core.app import App
+from antkeeper.core.app import App, _app_env
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -51,12 +52,16 @@ class Runner:
     def __init__(self, app: App, channel: Channel) -> None:
         """Initialize a new Runner instance.
 
-        Creates a unique run ID, sets up a dedicated file logger in app.log_dir,
-        and stores references to the app and channel. The logger is configured
-        with DEBUG level and writes to a timestamped file.
+        Creates a unique run ID, resolves the log directory (calling
+        ``app.log_dir(self)`` if it is callable, otherwise using it directly),
+        sets up a dedicated file logger in that directory, and stores references
+        to the app and channel. The logger is configured with DEBUG level and
+        writes to a timestamped file.
 
         Args:
-            app: The App instance containing registered handlers.
+            app: The App instance containing registered handlers. ``app.log_dir``
+                may be a plain string or a callable that accepts a Runner and
+                returns the directory path; it is resolved here at init time.
             channel: The Channel instance defining the workflow to execute.
         """
         self.id: str = uuid.uuid4().hex[:8]
@@ -65,10 +70,13 @@ class Runner:
 
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
 
+        # Resolve log_dir (may be a callable that receives the runner)
+        log_dir = app.log_dir(self) if callable(app.log_dir) else app.log_dir
+
         # Set up per-run file logger
-        os.makedirs(app.log_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
         log_filename = f"{timestamp}-{self.id}.log"
-        log_path = os.path.join(app.log_dir, log_filename)
+        log_path = os.path.join(log_dir, log_filename)
 
         # Set up per-run state file
         os.makedirs(app.state_dir, exist_ok=True)
@@ -87,10 +95,14 @@ class Runner:
     def run(self) -> State:
         """Execute the workflow with initial state setup.
 
-        Sets up the initial state with run_id and workflow_name, invokes the
-        workflow handler, persists state before and after execution, and logs
-        the execution lifecycle. Any exceptions during workflow execution are
-        logged and re-raised.
+        Sets up the initial state with run_id and workflow_name, then resolves
+        any callable values in ``app.env`` by calling each one with ``self``
+        (the Runner), and invokes the workflow handler inside an ``_app_env``
+        context so that the resolved environment variables are set in
+        ``os.environ`` for the duration of the handler and restored afterward.
+        Persists state before and after execution and logs the execution
+        lifecycle. Any exceptions during workflow execution are logged and
+        re-raised.
 
         Returns:
             The final state after workflow execution completes.
@@ -104,7 +116,13 @@ class Runner:
         self.logger.info(f"Workflow started: {self.workflow_name}")
         self.logger.debug(f"Initial state: {state}")
         try:
-            state = self.workflow(self, state)
+            resolved_env = (
+                {k: (v(self) if callable(v) else v) for k, v in self.app.env.items()}
+                if self.app.env
+                else self.app.env
+            )
+            with _app_env(resolved_env):
+                state = self.workflow(self, state)
         except Exception as e:
             self.logger.error(f"Workflow failed: {self.workflow_name} - {type(e).__name__}: {e}")
             raise

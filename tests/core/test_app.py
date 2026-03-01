@@ -36,3 +36,13 @@ def test_add_handler_overwrites_existing():
     first.__name__ = "_dummy_handler"
     app.add_handler(first)
     assert app.handlers["_dummy_handler"] is first
+
+
+def test_app_constructor_stores_env():
+    app = App(env={"FOO": "bar"})
+    assert app.env == {"FOO": "bar"}
+
+
+def test_app_constructor_default_env_is_none():
+    app = App()
+    assert app.env is None

@@ -1,6 +1,7 @@
 """Application framework for registering and managing workflow handlers.
 
 This module provides:
+- _app_env: Context manager that temporarily sets os.environ variables for a block
 - App: Central registry for workflow handlers with decorator-based registration
 - run_workflow: Helper function for executing sequential handler chains
 
@@ -10,7 +11,9 @@ decorator to register workflow functions, then pass the app to a Runner for exec
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable, NoReturn, TYPE_CHECKING
+import os
+from contextlib import contextmanager
+from typing import Any, Callable, Generator, NoReturn, TYPE_CHECKING
 
 from antkeeper.core.domain import State
 
@@ -19,6 +22,42 @@ if TYPE_CHECKING:
 
 
 # -- Core ----------------------------------------------------------------------
+
+
+@contextmanager
+def _app_env(env: dict[str, Any] | None) -> Generator[None]:
+    """Set environment variables for the duration of a block, then restore originals.
+
+    A no-op context manager when ``env`` is ``None`` or an empty dict. For non-empty
+    ``env``, saves the current values of all named variables, sets them in
+    ``os.environ`` (converting each value with ``str()``), yields control, then
+    restores the saved values in a ``finally`` block so that cleanup is guaranteed
+    even if the body raises.
+
+    If ``str()`` conversion raises for any value the exception propagates immediately;
+    the ``finally`` block still restores any variables that were already set.
+
+    Args:
+        env: A mapping of environment variable names to values, or ``None``.
+
+    Yields:
+        None
+    """
+    if not env:
+        yield
+        return
+
+    saved: dict[str, str | None] = {k: os.environ.get(k) for k in env}
+    try:
+        for k, v in env.items():
+            os.environ[k] = str(v)
+        yield
+    finally:
+        for k, original in saved.items():
+            if original is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = original
 
 
 class App:
@@ -36,26 +75,40 @@ class App:
 
     Attributes:
         handlers: Dictionary mapping handler names to their functions.
-        log_dir: Directory path where Runner instances will write log files.
+        log_dir: Directory path where Runner instances will write log files, or
+            a callable that accepts a Runner and returns the path. Resolved once
+            per Runner at initialization time.
         worktree_dir: Directory path where git worktrees will be created.
         state_dir: Directory path where Runner instances will write state files.
+        env: Optional dict of environment variable names to values. Values may
+            be callables that accept a Runner and return the resolved value.
+            Callables are evaluated per-handler invocation with the active
+            Runner passed as the argument, then applied to os.environ for the
+            duration of that invocation and restored afterward.
     """
-    def __init__(self, log_dir: str = "agents/logs/", worktree_dir: str = "trees/", state_dir: str = ".antkeeper/state/", handlers: dict[str, Callable] | None = None) -> None:
+    def __init__(self, log_dir: str | Callable[[Runner], str] = "agents/logs/", worktree_dir: str = "trees/", state_dir: str = ".antkeeper/state/", env: dict[str, Any | Callable[[Runner], Any]] | None = None, handlers: dict[str, Callable] | None = None) -> None:
         """Initialize a new App instance.
 
         Creates an empty handler registry and sets directory paths for logs,
         worktrees, and state files that will be used by Runner instances.
 
         Args:
-            log_dir: Directory for log files. Defaults to "agents/logs/".
+            log_dir: Directory for log files, or a callable accepting (runner)
+                that returns the directory path. Defaults to "agents/logs/".
             worktree_dir: Directory for git worktrees. Defaults to "trees/".
             state_dir: Directory for state files. Defaults to ".antkeeper/state/".
+            env: Optional dict of environment variable names to values. Values
+                may be callables accepting (runner) that return the value.
+                When set, values are resolved per handler invocation, exported
+                to os.environ before each handler runs, and restored afterward.
+                Static values are converted to str().
             handlers: Optional dict of pre-registered handlers to merge in.
         """
         self.handlers = {}
         self.log_dir = log_dir
         self.worktree_dir = worktree_dir
         self.state_dir = state_dir
+        self.env = env
         if handlers:
             self.handlers.update(handlers)
 
