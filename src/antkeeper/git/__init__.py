@@ -13,7 +13,7 @@ Exports:
 """
 
 from antkeeper.git.branch import current
-from antkeeper.git.core import GitCommandError, execute
+from antkeeper.git.core import GitCommandError, execute, latest_commit
 from antkeeper.git.worktrees import Worktree, WorktreeError, git_worktree
 
 __all__ = [
@@ -23,4 +23,5 @@ __all__ = [
     "current",
     "execute",
     "git_worktree",
+    "latest_commit",
 ]

@@ -40,7 +40,7 @@ class App:
         worktree_dir: Directory path where git worktrees will be created.
         state_dir: Directory path where Runner instances will write state files.
     """
-    def __init__(self, log_dir: str = "agents/logs/", worktree_dir: str = "trees/", state_dir: str = ".antkeeper/state/") -> None:
+    def __init__(self, log_dir: str = "agents/logs/", worktree_dir: str = "trees/", state_dir: str = ".antkeeper/state/", handlers: dict[str, Callable] | None = None) -> None:
         """Initialize a new App instance.
 
         Creates an empty handler registry and sets directory paths for logs,
@@ -50,11 +50,25 @@ class App:
             log_dir: Directory for log files. Defaults to "agents/logs/".
             worktree_dir: Directory for git worktrees. Defaults to "trees/".
             state_dir: Directory for state files. Defaults to ".antkeeper/state/".
+            handlers: Optional dict of pre-registered handlers to merge in.
         """
         self.handlers = {}
         self.log_dir = log_dir
         self.worktree_dir = worktree_dir
         self.state_dir = state_dir
+        if handlers:
+            self.handlers.update(handlers)
+
+    def add_handler(self, fn: Callable) -> None:
+        """Register a function as a handler using its __name__ as the key.
+
+        Programmatic equivalent of @app.handler. If a handler with the same
+        name already exists, it is overwritten.
+
+        Args:
+            fn: The handler function to register.
+        """
+        self.handlers[fn.__name__] = fn  # type: ignore[attr-defined]
 
     def handler(self, fn: Callable[..., Any]) -> Callable[..., Any]:
         """Register a function as a workflow handler.
