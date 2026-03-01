@@ -101,7 +101,7 @@ src/antkeeper/
 
 - **State** (`dict[str, Any]`) — All workflow data flows as a flat dictionary. Handlers receive and return `State`; the `Runner` injects `run_id` and `workflow_name`. State is automatically persisted as JSON on every change.
 - **Channel** (Protocol) — I/O boundary adapter. Owns how progress/errors are reported and what initial state is supplied. This is the primary extension point for new I/O adapters.
-- **App** — Handler registry. Use the `@app.handler` decorator to register workflow steps by function name. Configure log, worktree, and state directories via `App(log_dir="...", worktree_dir="...", state_dir="...")`.
+- **App** — Handler registry. Use the `@app.handler` decorator to register workflow steps by function name. Configure log, worktree, and state directories via `App(log_dir="...", worktree_dir="...", state_dir="...")`. Optionally supply `env={"KEY": value}` to inject environment variables for every handler run (values are converted to `str()`).
 - **Runner** — Execution engine. Binds an `App` + `Channel`, generates a `run_id`, and drives the workflow lifecycle. Persists state to `{timestamp}-{run_id}.json` in `app.state_dir`.
 - **run_workflow** — Composition helper. Folds state through a list of handler callables, enabling composite workflows without inheritance or a DAG scheduler.
 - **Agent** (Protocol) — LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. Extension point for new LLM backends.
@@ -151,6 +151,10 @@ from antkeeper.core.domain import State
 
 app = App()  # Defaults: log_dir="agents/logs/", worktree_dir="trees/", state_dir=".antkeeper/state/"
 # Or configure: App(log_dir="my/logs/", worktree_dir="worktrees/", state_dir=".antkeeper/state/")
+# Inject env vars for every handler: App(env={"API_KEY": "sk-123", "TIMEOUT": 30})
+#   - Values are converted to str() before setting on os.environ
+#   - Original values are restored after each handler completes (success or failure)
+#   - Keys absent from os.environ before are removed after handler completes (not set to "None")
 
 @app.handler
 def my_step(runner: Runner, state: State) -> State:
