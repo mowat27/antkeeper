@@ -79,7 +79,7 @@ def branch(runner: Runner, state: State) -> State:
     runner.report_progress("Running /branch")
     agent = ClaudeCodeAgent(model=state.get("model"))
     prompt = (
-        f'/branch {state["spec_file"]}\n\n'
+        f'/sdlc:branch {state["spec_file"]}\n\n'
         "After running the command, return ONLY a JSON object with the branch name: "
         '{"branch_name": "<branch>"}'
     )
@@ -104,7 +104,7 @@ def implement(runner: Runner, state: State) -> State:
     """
     runner.report_progress("Running /implement")
     agent = ClaudeCodeAgent(model=state.get("model"))
-    prompt = f'/implement {state["spec_file"]}'
+    prompt = f'/sdlc:implement {state["spec_file"]}'
     runner.logger.info(f"implement prompt: {prompt}")
     response = agent.prompt(prompt)
     runner.logger.info(f"implement response length: {len(response)} chars")
@@ -147,7 +147,7 @@ def derive_feature(runner: Runner, state: State) -> State:
     runner.report_progress("Deriving feature metadata")
     agent = ClaudeCodeAgent(model=state.get("model"))
     prompt = (
-        f'/derive_feature {state["prompt"]}\n\n'
+        f'/sdlc:derive_feature {state["prompt"]}\n\n'
         "After running the command, return ONLY a JSON object: "
         '{"feature_type": "<type>", "slug": "<slug>"}'
     )
