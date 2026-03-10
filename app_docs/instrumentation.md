@@ -152,6 +152,69 @@ def my_step(runner: Runner, state: State) -> State:
 
 Module-level loggers exist in `cli.py`, `channels/cli.py`, `channels/slack.py`, and `llm/claude_code.py`. These only produce output if a user configures handlers on them or their parents — they serve as extension points for additional logging.
 
+## Claude Code Handler Factory
+
+The `cc_handler` factory (`antkeeper.handlers.claude_code.factories`) eliminates boilerplate for building Claude Code handlers. It produces `(Runner, State) -> State` callables in two modes:
+
+- **Simple mode** — run the LLM command, then merge static key/value pairs into state.
+- **JSON mode** — wrap the command with JSON instructions, parse the LLM response, and merge specific fields into state.
+
+```python
+from antkeeper.handlers.claude_code import cc_handler
+
+# Simple mode: run LLM, then merge {"implement_status": "complete"} into state
+implement = cc_handler("/implement {spec_file}", updates={"implement_status": "complete"})
+
+# JSON mode: run LLM, parse JSON response, extract spec_file and slug into state
+specify = cc_handler("/specify {prompt}", json_fields=["spec_file", "slug"])
+```
+
+### Label and Progress Messages
+
+The factory standardises progress reporting to `"Running {label}"` and `"{label} complete"`. The label defaults to the first whitespace-delimited token of the command with any leading `/` stripped:
+
+- `/implement {spec_file}` → label `implement`
+- `/branch {spec_file}` with explicit `label="branch_if_on_main"` → label `branch_if_on_main`
+
+The generated handler's `__name__` attribute is set to the label, making it compatible with `app.add_handler()`.
+
+### Command Interpolation
+
+Command strings use Python format strings. Placeholders (`{key}`) are resolved from the current state at call time via `str.format_map(state)`. A missing state key raises `WorkflowFailedError` (via `runner.fail()`).
+
+### Error Handling
+
+The factory wraps the LLM call, interpolation, and response parsing in a single `try/except` that catches:
+- `KeyError` — missing state key in command format string
+- `AgentExecutionError` — LLM subprocess failure
+- `ValueError` — unparseable JSON response or missing required JSON field
+
+All three route through `runner.fail(f"{label} failed: {error}")`, which raises `WorkflowFailedError`. This is an improvement over the hand-written handlers it replaces, which let exceptions propagate uncaught.
+
+### Validation
+
+`cc_handler` validates its arguments at call time (not when the handler runs). Providing both `updates` and `json_fields`, or providing neither, raises `ValueError` immediately.
+
+### When to Use the Factory vs Hand-Written Handlers
+
+Use `cc_handler` for handlers that:
+- Run a single LLM command and either merge static updates or extract JSON fields into state
+- Need no post-LLM logic beyond the standard state merge
+
+Write handlers by hand when:
+- Additional computation is needed after the LLM call (e.g. `commit` calls `latest_commit()` on the result)
+- The handler logs or posts the raw LLM response directly (e.g. `healthcheck`)
+- The handler composes multiple steps via `run_workflow()`
+
+### Registering Factory-Built Handlers
+
+Factory-built handlers are not decorated with `@app.handler`, so they must be explicitly registered:
+
+```python
+implement = cc_handler("/implement {spec_file}", updates={"implement_status": "complete"})
+app.add_handler(implement)  # uses handler.__name__ as the registered name
+```
+
 ## LLM Agent Execution
 
 The `ClaudeCodeAgent` provides flexible configuration for invoking the Claude CLI:

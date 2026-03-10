@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-01
+# Last validated: 2026-03-10
 
 overview:
   name: antkeeper
@@ -86,19 +86,30 @@ architecture:
         utilities. Handlers use git worktrees to run SDLC steps in
         separate working directories without affecting the main checkout.
       modules:
-        - __init__.py     # Re-exports Worktree, WorktreeError, git_worktree, GitCommandError, execute, current
-        - core.py         # GitCommandError exception, execute() for running git subprocess commands
+        - __init__.py     # Re-exports Worktree, WorktreeError, git_worktree, GitCommandError, execute, current, latest_commit
+        - core.py         # GitCommandError exception, execute() for running git subprocess commands, latest_commit()
         - branch.py       # current() — returns name of current git branch
         - worktrees.py    # Worktree class, WorktreeError, git_worktree context manager
+
+    - name: handlers
+      path: src/antkeeper/handlers/
+      responsibility: >
+        Pre-built handler packages. Currently contains the claude_code subpackage,
+        which provides a factory and a module-level App with 11 registered handlers
+        for SDLC workflows backed by ClaudeCodeAgent.
+      modules:
+        - __init__.py
+        - claude_code/__init__.py  # App with registered SDLC handlers; import app.handlers into your own App
+        - claude_code/factories.py  # cc_handler factory
 
     - name: helpers
       path: src/antkeeper/helpers/
       responsibility: >
-        Shared utility functions. Currently contains JSON extraction for
-        parsing LLM responses that embed JSON in markdown or prose.
+        Shared utility functions. Contains JSON extraction and JSON prompt building
+        for parsing/instructing LLM responses that embed JSON in markdown or prose.
       modules:
-        - __init__.py  # Re-exports extract_json via __all__
-        - json.py  # extract_json — finds first {…} in text, parses as JSON
+        - __init__.py  # Re-exports extract_json and json_prompt via __all__
+        - json.py  # extract_json — finds first {…} in text, parses as JSON; json_prompt — appends JSON output instructions to a prompt
 
     - name: http
       path: src/antkeeper/http/
@@ -288,11 +299,20 @@ git_objects:
     file: src/antkeeper/git/core.py
     signature: "execute(cmd: list[str]) -> str"
     responsibility: >
-      Low-level git command runner. Takes a full command list (including
-      "git" prefix), runs via subprocess.run with capture_output=True,
-      returns stripped stdout on success, raises GitCommandError with
-      stderr on non-zero exit. Logging via module-level logger
-      (antkeeper.git.core).
+      Low-level git command runner. Accepts a command list with or without
+      the "git" prefix — auto-prepends "git" if missing (both ["status"]
+      and ["git", "status"] are valid). Runs via subprocess.run with
+      capture_output=True, returns stripped stdout on success, raises
+      GitCommandError with stderr on non-zero exit. Logging via
+      module-level logger (antkeeper.git.core).
+
+  latest_commit:
+    file: src/antkeeper/git/core.py
+    signature: "latest_commit() -> dict"
+    responsibility: >
+      Returns {"sha": str, "message": str} for the most recent commit.
+      Uses unit-separator delimiter (\x1f) to safely parse commit messages
+      containing quotes or special characters. Re-exported from git/__init__.py.
 
   current:
     file: src/antkeeper/git/branch.py
@@ -381,6 +401,79 @@ llm_types:
       errors:
         - "Non-zero exit -> AgentExecutionError with stderr"
         - "Missing binary -> AgentExecutionError('claude binary not found')"
+
+  run_prompt:
+    file: src/antkeeper/llm/claude_code.py
+    signature: "run_prompt(prompt: str, logger: logging.Logger, model: str | None = None) -> str"
+    kind: module-level convenience function
+    responsibility: >
+      Creates a ClaudeCodeAgent(model=model, yolo=True), sends the prompt,
+      returns the response string. The standard way handlers invoke the LLM
+      — avoids constructing ClaudeCodeAgent directly. Not exported from
+      antkeeper/__init__.py; imported directly from antkeeper.llm.claude_code.
+
+helper_functions:
+  extract_json:
+    file: src/antkeeper/helpers/json.py
+    signature: "extract_json(text: str) -> dict"
+    responsibility: >
+      Finds first '{' and last '}' in text, extracts substring, parses as JSON.
+      Raises ValueError if no braces found or JSON is invalid. Handles LLM
+      responses wrapped in markdown code fences or prose.
+
+  json_prompt:
+    file: src/antkeeper/helpers/json.py
+    signature: "json_prompt(prompt: str, *, required_fields: list[str]) -> str"
+    responsibility: >
+      Appends JSON output instructions and an example object to a prompt.
+      Builds example dict {field: '<field>'} for each required field, appends
+      "return ONLY a JSON object: ..." instruction. Used by cc_handler to
+      instruct the LLM to respond with structured JSON.
+
+handler_factories:
+  cc_handler:
+    file: src/antkeeper/handlers/claude_code/factories.py
+    signature: "cc_handler(command: str, *, updates: dict[str, Any] | None = None, json_fields: list[str] | None = None, label: str | None = None) -> Callable[[Runner, State], State]"
+    responsibility: >
+      Factory producing (Runner, State) -> State handler functions in two modes:
+      simple mode (updates provided) and JSON mode (json_fields provided).
+      Exactly one of updates or json_fields must be provided — raises ValueError otherwise.
+    behavior:
+      label_derivation: "Default label = first token of command with leading '/' stripped. Custom label overrides."
+      handler.__name__: "Set to label for framework introspection."
+      simple_mode: >
+        Interpolates command with state via format_map, calls run_prompt,
+        merges static updates dict into state.
+      json_mode: >
+        Interpolates command, wraps with json_prompt(required_fields=json_fields),
+        calls run_prompt, calls extract_json on response, picks only json_fields
+        from parsed dict, merges into state.
+      error_handling: >
+        KeyError (missing state key), AgentExecutionError (LLM failure),
+        and ValueError (bad JSON or missing field) all call runner.fail()
+        which raises WorkflowFailedError.
+      progress: "Reports 'Running {label}' and '{label} complete' via runner.report_progress."
+
+  handlers_package_app:
+    file: src/antkeeper/handlers/claude_code/__init__.py
+    purpose: >
+      Module-level App instance with 11 pre-registered SDLC handlers. Import
+      app.handlers into your own App via App(handlers=claude_code_app.handlers)
+      to reuse these handlers without re-defining them.
+    factory_built_handlers:
+      - "derive_feature: cc_handler('/derive_feature {prompt}', json_fields=['feature_type', 'slug'])"
+      - "specify: cc_handler('/specify {prompt}', json_fields=['spec_file', 'slug'])"
+      - "branch_if_on_main: cc_handler('/branch {spec_file}', json_fields=['branch_name'], label='branch_if_on_main')"
+      - "implement: cc_handler('/implement {spec_file}', updates={'implement_status': 'complete'})"
+      - "push: cc_handler('Push the current branch...', updates={'push_status': 'complete'}, label='push')"
+      - "raise_a_pr: cc_handler('Create a pull request...', updates={'pr_status': 'complete'}, label='raise_a_pr')"
+    hand_written_handlers:
+      - "healthcheck: asks Claude for a short poem, returns {poem}"
+      - "commit: runs /commit, calls latest_commit(), returns {last_commit: {sha, message}}"
+    workflows:
+      - "specify_implement: run_workflow([specify, implement])"
+      - "sdlc: run_workflow([specify, branch_if_on_main, commit, implement, commit, push, raise_a_pr])"
+      - "sdlc_iso: derive_feature -> create worktree on {feature_type}/{slug} branch -> run_workflow([specify, commit, implement, commit, push, raise_a_pr]) -> return state + worktree_path + branch_name"
 
 channel_implementations:
   CliChannel:
@@ -587,78 +680,12 @@ http_modules:
       single-threaded event loop. (channel_id, ts) key naturally
       deduplicates app_mention + message events.
 
-handlers_file:
-  file: handlers.py
-  purpose: >
-    Default user-land agents file exporting `app`. Contains LLM-backed
-    workflow handlers that use ClaudeCodeAgent to run slash commands,
-    extract structured JSON from responses, and thread results through state.
-  app: "App()  # default log_dir and worktree_dir"
-  code_organization: >
-    File is structured in three sections, marked by comment headers:
-    1. Steps (# --- Steps ---) — individual handler functions
-    2. Shared workflow constants (# --- Shared workflow constants ---) —
-       step lists shared by multiple workflows (e.g. SDLC_STEPS).
-       Constants are only defined when shared; otherwise steps are inlined.
-    3. Workflows (# --- Workflows ---) — composite handlers that call
-       run_workflow or orchestrate steps.
-  steps:
-    healthcheck:
-      description: "Asks Claude to write a short poem; verifies the agent pipeline works"
-      state_in: ["model"]
-      state_out: ["poem"]
-
-    specify:
-      description: "Runs /specify, extracts spec_file and slug via extract_json"
-      state_in: ["prompt", "model"]
-      state_out: ["spec_file", "slug"]
-
-    branch:
-      description: "Runs /branch, extracts branch_name via extract_json"
-      state_in: ["spec_file", "model"]
-      state_out: ["branch_name"]
-
-    implement:
-      description: "Runs /implement against spec_file"
-      state_in: ["spec_file", "model"]
-      state_out: ["implement_status"]
-
-    document:
-      description: "Runs /document to update docs for current branch"
-      state_in: ["model"]
-      state_out: ["document_status"]
-
-    derive_feature:
-      description: "Runs /derive_feature, extracts feature_type and slug via extract_json"
-      state_in: ["prompt", "model"]
-      state_out: ["feature_type", "slug"]
-
-  shared_constants:
-    SDLC_STEPS: "[specify, branch, implement, document]  # used by sdlc and specify_and_branch"
-
-  workflows:
-    specify_implement:
-      description: "Partial SDLC: specify -> implement only"
-      steps: "run_workflow(runner, state, [specify, implement])"
-
-    sdlc:
-      description: "Composite workflow: specify -> branch -> implement -> document"
-      steps: "run_workflow(runner, state, SDLC_STEPS)"
-
-    specify_and_branch:
-      description: "Partial SDLC: specify -> branch only"
-      steps: "run_workflow(runner, state, SDLC_STEPS[0:2])"
-
-    sdlc_iso:
-      description: >
-        Isolated SDLC workflow. Calls derive_feature to get feature_type
-        and slug, creates a git worktree named {timestamp}-{run_id} on a
-        branch {feature_type}/{slug}, runs specify -> implement -> document
-        inside the worktree, then returns. Worktree is NOT removed on exit
-        (remove=False). Steps are inlined as [specify, implement, document]
-        (no shared constant — only used by this workflow).
-      state_in: ["prompt", "model"]
-      state_out: ["feature_type", "slug", "spec_file", "implement_status", "document_status", "worktree_path", "branch_name"]
+handlers_package:
+  note: >
+    The canonical handler implementations live in src/antkeeper/handlers/claude_code/.
+    See handler_factories section above for full detail. There is no top-level
+    handlers.py in the framework source; users create their own handlers file
+    (default: handlers.py) that imports from antkeeper.handlers.claude_code.
 
 data_flow:
   cli_happy_path:
@@ -688,7 +715,7 @@ data_flow:
     - "sdlc_iso calls derive_feature to get feature_type and slug"
     - "Creates Worktree(base_dir=runner.app.worktree_dir, name='{timestamp}-{run_id}')"
     - "Enters git_worktree(wt, create=True, branch='{feature_type}/{slug}', remove=False)"
-    - "Inside worktree: runs specify -> implement -> document via run_workflow"
+    - "Inside worktree: runs specify -> commit -> implement -> commit -> push -> raise_a_pr via run_workflow"
     - "On exit: cwd restored, worktree kept on disk for inspection"
     - "Returns state with worktree_path and branch_name added"
   slack_happy_path:
@@ -760,6 +787,7 @@ testing_design:
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
+    - tests/handlers/test_factories.py — cc_handler construction validation, label derivation, simple mode (state merge, interpolation, progress), JSON mode (field extraction, prompt wrapping, progress), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field), edge cases (no placeholders, multiple placeholders, empty updates, single JSON field)
 
 key_design_decisions:
   - >
@@ -797,6 +825,12 @@ key_design_decisions:
   - >
     Per-run file logging. Each Runner creates an isolated log file. No console
     logging from the framework. Module-level loggers provide debug tracing.
+  - >
+    Pre-built handler package. src/antkeeper/handlers/claude_code/ provides a
+    ready-made App with 11 SDLC handlers. The cc_handler factory in factories.py
+    eliminates boilerplate for handlers that run an LLM command and update state
+    (simple mode) or parse JSON from the response (JSON mode). Handlers built by
+    the factory have __name__ set to their label for framework introspection.
   - >
     Git worktree isolation. The sdlc_iso handler creates a git worktree for
     each run, branching on {feature_type}/{slug}. This enables parallel

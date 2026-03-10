@@ -13,13 +13,34 @@ from antkeeper.core.app import App, run_workflow
 from antkeeper.core.runner import Runner
 from antkeeper.core.domain import State
 from antkeeper.git import Worktree, git_worktree, latest_commit
-from antkeeper.helpers.json import extract_json, json_prompt
 from antkeeper.llm.claude_code import run_prompt
+from antkeeper.handlers.claude_code.factories import cc_handler
 
 app = App()
 
 
-# --- Steps ---
+# --- Steps (factory-built) ---
+
+derive_feature = cc_handler("/derive_feature {prompt}", json_fields=["feature_type", "slug"])
+app.add_handler(derive_feature)
+
+specify = cc_handler("/specify {prompt}", json_fields=["spec_file", "slug"])
+app.add_handler(specify)
+
+branch_if_on_main = cc_handler("/branch {spec_file}", json_fields=["branch_name"], label="branch_if_on_main")
+app.add_handler(branch_if_on_main)
+
+implement = cc_handler("/implement {spec_file}", updates={"implement_status": "complete"})
+app.add_handler(implement)
+
+push = cc_handler("Push the current branch to the remote origin.", updates={"push_status": "complete"}, label="push")
+app.add_handler(push)
+
+raise_a_pr = cc_handler("Create a pull request for the current branch using gh pr create.", updates={"pr_status": "complete"}, label="raise_a_pr")
+app.add_handler(raise_a_pr)
+
+
+# --- Steps (hand-written) ---
 
 
 @app.handler
@@ -38,40 +59,6 @@ def healthcheck(runner: Runner, state: State) -> State:
 
 
 @app.handler
-def derive_feature(runner: Runner, state: State) -> State:
-    """Derive feature type and slug from a prompt via LLM."""
-    runner.report_progress("Deriving feature metadata")
-    prompt = json_prompt(
-        f'/derive_feature {state["prompt"]}',
-        required_fields=["feature_type", "slug"],
-    )
-    runner.logger.info(f"derive_feature prompt: {prompt}")
-    response = run_prompt(prompt, runner.logger, model=state.get("model"))
-    runner.logger.info(f"derive_feature response: {response}")
-    parsed = extract_json(response)
-    feature_type = parsed["feature_type"]
-    slug = parsed["slug"]
-    runner.report_progress(f"Derived: feature_type={feature_type}, slug={slug}")
-    return {**state, "feature_type": feature_type, "slug": slug}
-
-
-@app.handler
-def specify(runner: Runner, state: State) -> State:
-    """Generate a specification and extract spec_file and slug from the response."""
-    runner.report_progress("Running /specify")
-    prompt = json_prompt(
-        f'/specify {state["prompt"]}',
-        required_fields=["spec_file", "slug"],
-    )
-    runner.logger.info(f"specify prompt: {prompt}")
-    response = run_prompt(prompt, runner.logger, model=state.get("model"))
-    runner.logger.info(f"specify response: {response}")
-    parsed = extract_json(response)
-    runner.report_progress("/specify complete")
-    return {**state, "spec_file": parsed["spec_file"], "slug": parsed["slug"]}
-
-
-@app.handler
 def commit(runner: Runner, state: State) -> State:
     """Commit current changes with an auto-generated message."""
     runner.report_progress("Running /commit")
@@ -80,62 +67,6 @@ def commit(runner: Runner, state: State) -> State:
     lc = latest_commit()
     runner.report_progress(f"/commit complete: {lc['sha'][:8]}")
     return {**state, "last_commit": lc}
-
-
-@app.handler
-def branch_if_on_main(runner: Runner, state: State) -> State:
-    """Create a feature branch if currently on main."""
-    runner.report_progress("Running /branch")
-    prompt = json_prompt(
-        f'/branch {state["spec_file"]}',
-        required_fields=["branch_name"],
-    )
-    runner.logger.info(f"branch prompt: {prompt}")
-    response = run_prompt(prompt, runner.logger, model=state.get("model"))
-    runner.logger.info(f"branch response: {response}")
-    parsed = extract_json(response)
-    runner.report_progress("/branch complete")
-    return {**state, "branch_name": parsed["branch_name"]}
-
-
-@app.handler
-def implement(runner: Runner, state: State) -> State:
-    """Implement a feature from a spec/plan."""
-    runner.report_progress("Running /implement")
-    prompt = f'/implement {state["spec_file"]}'
-    runner.logger.info(f"implement prompt: {prompt}")
-    response = run_prompt(prompt, runner.logger, model=state.get("model"))
-    runner.logger.info(f"implement response length: {len(response)} chars")
-    runner.report_progress("/implement complete")
-    return {**state, "implement_status": "complete"}
-
-
-@app.handler
-def push(runner: Runner, state: State) -> State:
-    """Push the current branch to the remote."""
-    runner.report_progress("Running git push")
-    response = run_prompt(
-        "Push the current branch to the remote origin.",
-        runner.logger,
-        model=state.get("model"),
-    )
-    runner.logger.info(f"push response length: {len(response)} chars")
-    runner.report_progress("Push complete")
-    return {**state, "push_status": "complete"}
-
-
-@app.handler
-def raise_a_pr(runner: Runner, state: State) -> State:
-    """Raise a pull request for the current branch."""
-    runner.report_progress("Raising PR")
-    response = run_prompt(
-        "Create a pull request for the current branch using gh pr create.",
-        runner.logger,
-        model=state.get("model"),
-    )
-    runner.logger.info(f"raise_a_pr response length: {len(response)} chars")
-    runner.report_progress("PR raised")
-    return {**state, "pr_status": "complete"}
 
 
 # --- Workflows ---
@@ -159,7 +90,26 @@ def sdlc(runner: Runner, state: State) -> State:
 
 @app.handler
 def sdlc_iso(runner: Runner, state: State) -> State:
-    """Run SDLC workflow inside an isolated git worktree."""
+    """Run the full SDLC workflow inside an isolated git worktree.
+
+    Derives the feature type and slug from state, creates a timestamped
+    worktree under ``runner.app.worktree_dir``, checks out a new branch
+    named ``<feature_type>/<slug>``, then runs the full SDLC steps
+    (specify -> commit -> implement -> commit -> push -> raise_a_pr) inside
+    that worktree.  The worktree is intentionally left on disk after the
+    workflow so the branch can be inspected or retried.
+
+    Args:
+        runner: The active workflow runner providing logging and progress
+            reporting.
+        state: Workflow state dict. Must contain a ``prompt`` key (and
+            optionally ``model``) consumed by ``derive_feature``.
+
+    Returns:
+        Updated state dict with all SDLC fields merged in, plus:
+            - ``worktree_path`` (str): Absolute path to the created worktree.
+            - ``branch_name`` (str): Name of the new git branch.
+    """
     state = derive_feature(runner, state)
     worktree_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{runner.id}"
     branch_name = f"{state['feature_type']}/{state['slug']}"

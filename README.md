@@ -83,6 +83,10 @@ src/antkeeper/
 │   ├── core.py         # Low-level command execution (execute, GitCommandError)
 │   ├── branch.py       # Branch operations (current)
 │   └── worktrees.py    # Worktree class, git_worktree context manager
+├── handlers/           # Pre-built handler collections
+│   └── claude_code/    # SDLC handlers using Claude Code as the LLM backend
+│       ├── __init__.py # 11 registered handlers + module-level app instance
+│       └── factories.py # cc_handler factory for building handlers without boilerplate
 ├── helpers/
 │   └── json.py         # JSON extraction utilities
 ├── llm/                # LLM agent abstraction layer
@@ -336,7 +340,7 @@ just test    # Tests
 uv run -m pytest tests/ -v
 ```
 
-Tests are organized to mirror the source layout (`tests/core/`, `tests/channels/`, `tests/llm/`, `tests/git/`). Each test owns its setup using shared fixtures from `tests/conftest.py`. The `app` fixture provides log, worktree, and state isolation via temp directories. Git-specific tests use the `git_repo` fixture from `tests/git/conftest.py`.
+Tests are organized to mirror the source layout (`tests/core/`, `tests/channels/`, `tests/handlers/`, `tests/llm/`, `tests/git/`). Each test owns its setup using shared fixtures from `tests/conftest.py`. The `app` fixture provides log, worktree, and state isolation via temp directories. Git-specific tests use the `git_repo` fixture from `tests/git/conftest.py`.
 
 ### Navigating the Codebase
 
@@ -352,6 +356,8 @@ The **http layer** (`src/antkeeper/http/`) contains HTTP endpoint logic:
 - `webhook.py` exports `handle_webhook()` (POST `/webhook` implementation)
 - `slack_events.py` exports `SlackEventProcessor` class (POST `/slack_event` implementation with debounce state)
 - `server.py` in the root defines routes with `@api.post()` decorators and delegates to these modules
+
+The **handlers layer** (`src/antkeeper/handlers/`) contains pre-built handler collections. `handlers/claude_code/` provides 11 SDLC handlers using Claude Code as the LLM backend, exportable as a module-level `app` instance. `factories.py` inside that package exports `cc_handler`, a factory for building `(Runner, State) -> State` handlers in simple mode (static state updates) or JSON mode (LLM response parsing) without boilerplate.
 
 The **llm layer** (`src/antkeeper/llm/`) abstracts LLM interactions behind the `Agent` protocol. `ClaudeCodeAgent` is the concrete implementation. Add new LLM backends by implementing `prompt(str) -> str`.
 

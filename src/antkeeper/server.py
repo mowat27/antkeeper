@@ -3,6 +3,16 @@
 This module defines the FastAPI application and HTTP endpoints for executing
 Antkeeper workflows via webhooks and processing Slack events. Routes are
 defined here and delegate to library modules for implementation.
+
+The module-level ``app`` object is the ASGI application instance passed to
+uvicorn or any other ASGI server. It is created by calling ``create_app()``
+with defaults drawn from the ``ANTKEEPER_HANDLERS_FILE`` environment variable
+(falling back to ``"handlers.py"``).
+
+Example:
+    Start the server with uvicorn::
+
+        uvicorn antkeeper.server:app --reload
 """
 import os
 
@@ -76,14 +86,4 @@ def create_app(agents_file: str = os.environ.get("ANTKEEPER_HANDLERS_FILE", "han
 
 
 app = create_app()
-"""FastAPI application instance configured with Antkeeper workflow routes.
 
-This is the ASGI application instance that should be passed to uvicorn or
-other ASGI servers. It is created by calling create_app() with default
-parameters (reading from ANTKEEPER_HANDLERS_FILE environment variable or
-using "handlers.py" as the default agents file).
-
-Example:
-    Run with uvicorn:
-        uvicorn antkeeper.server:app --reload
-"""

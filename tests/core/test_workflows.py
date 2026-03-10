@@ -107,6 +107,7 @@ class TestAppEnvironment:
     """Tests for App env parameter and env var lifecycle during handler execution."""
 
     def test_handler_sees_env_vars(self):
+        """Test that env vars defined on App are visible to the handler via os.environ."""
         key = f"{_ENV_PREFIX}VAR1"
         app = _make_env_app(env={key: "hello"})
 
@@ -117,6 +118,7 @@ class TestAppEnvironment:
         assert result["val"] == "hello"
 
     def test_env_values_converted_to_string(self):
+        """Test that non-string env values are converted to strings before being set."""
         key = f"{_ENV_PREFIX}NUM"
         app = _make_env_app(env={key: 42})
 
@@ -127,6 +129,7 @@ class TestAppEnvironment:
         assert result["val"] == "42"
 
     def test_env_restored_after_successful_handler(self):
+        """Test that env vars set by App are removed from os.environ after a successful run."""
         key = f"{_ENV_PREFIX}RESTORE"
         os.environ.pop(key, None)
         app = _make_env_app(env={key: "temp"})
@@ -138,6 +141,7 @@ class TestAppEnvironment:
         assert key not in os.environ
 
     def test_env_restored_after_failed_handler(self):
+        """Test that env vars are removed from os.environ even when the handler raises."""
         key = f"{_ENV_PREFIX}FAIL"
         os.environ.pop(key, None)
         app = _make_env_app(env={key: "temp"})
@@ -153,6 +157,7 @@ class TestAppEnvironment:
         assert key not in os.environ
 
     def test_existing_env_var_preserved(self):
+        """Test that a pre-existing env var is restored to its original value after the run."""
         key = f"{_ENV_PREFIX}EXISTING"
         os.environ[key] = "original"
         try:
@@ -168,6 +173,7 @@ class TestAppEnvironment:
             os.environ.pop(key, None)
 
     def test_none_env_is_noop(self):
+        """Test that passing env=None has no effect on environment or handler execution."""
         app = _make_env_app(env=None)
 
         def noop(runner, state):
@@ -177,6 +183,7 @@ class TestAppEnvironment:
         assert "run_id" in result
 
     def test_empty_env_dict_is_noop(self):
+        """Test that passing an empty env dict has no effect on handler execution."""
         app = _make_env_app(env={})
 
         def noop(runner, state):
@@ -186,6 +193,7 @@ class TestAppEnvironment:
         assert "run_id" in result
 
     def test_invalid_env_value_propagates(self):
+        """Test that an env value that cannot be converted to string raises ValueError."""
         class BadStr:
             def __str__(self):
                 raise ValueError("cannot convert")
@@ -205,6 +213,7 @@ class TestAppEnvironment:
         assert key not in os.environ
 
     def test_run_workflow_steps_see_env_vars(self):
+        """Test that env vars are visible to all steps within a run_workflow call."""
         key = f"{_ENV_PREFIX}STEPS"
         app = _make_env_app(env={key: "visible"})
 
@@ -222,6 +231,7 @@ class TestAppEnvironment:
         assert result["b"] == "visible"
 
     def test_env_restored_after_run_workflow_step_failure(self):
+        """Test that env vars are cleaned up when a step inside run_workflow raises."""
         key = f"{_ENV_PREFIX}STEPFAIL"
         os.environ.pop(key, None)
         app = _make_env_app(env={key: "temp"})
@@ -240,6 +250,7 @@ class TestAppEnvironment:
         assert key not in os.environ
 
     def test_callable_env_value_resolved_before_handler(self):
+        """Test that a callable env value is resolved and set before the handler runs."""
         key = f"{_ENV_PREFIX}CALLABLE"
         app = _make_env_app(env={key: lambda runner: "computed"})
 
@@ -250,6 +261,7 @@ class TestAppEnvironment:
         assert result["val"] == "computed"
 
     def test_mixed_callable_and_static_env(self):
+        """Test that a mix of static and callable env values are both resolved correctly."""
         key_a = f"{_ENV_PREFIX}STATIC"
         key_b = f"{_ENV_PREFIX}DYNAMIC"
         app = _make_env_app(env={key_a: "static", key_b: lambda runner: "dynamic"})
@@ -262,6 +274,7 @@ class TestAppEnvironment:
         assert result["b"] == "dynamic"
 
     def test_callable_env_receives_runner_properties(self):
+        """Test that callable env values receive the Runner instance and can use its properties."""
         key = f"{_ENV_PREFIX}RUNID"
         app = _make_env_app(env={key: lambda runner: runner.id})
 
@@ -272,6 +285,7 @@ class TestAppEnvironment:
         assert result["env_val"] == result["run_id"]
 
     def test_callable_env_restored_after_run(self):
+        """Test that env vars set via callable are removed from os.environ after the run."""
         key = f"{_ENV_PREFIX}CALLABLE_RESTORE"
         os.environ.pop(key, None)
         app = _make_env_app(env={key: lambda runner: "temp_value"})
@@ -283,6 +297,7 @@ class TestAppEnvironment:
         assert key not in os.environ
 
     def test_callable_env_that_raises_propagates(self):
+        """Test that an exception raised inside a callable env value propagates to the caller."""
         key = f"{_ENV_PREFIX}CALLABLE_ERR"
         os.environ.pop(key, None)
 
@@ -302,6 +317,7 @@ class TestAppEnvironment:
         assert key not in os.environ
 
     def test_env_with_no_callables_unchanged(self):
+        """Test that a static env dict without callables is applied without modification."""
         key = f"{_ENV_PREFIX}PLAIN"
         app = _make_env_app(env={key: "plain_value"})
 
@@ -316,6 +332,7 @@ class TestCallableLogDir:
     """Tests for callable log_dir support in App."""
 
     def test_callable_log_dir_resolves_with_runner(self):
+        """Test that a callable log_dir is resolved using the Runner and the resulting dir is created."""
         base = tempfile.mkdtemp()
         app = App(
             log_dir=lambda runner: os.path.join(base, runner.id),
@@ -338,6 +355,7 @@ class TestCallableLogDir:
         assert log_files[0].endswith(".log")
 
     def test_static_log_dir_still_works(self):
+        """Test that a plain string log_dir continues to work correctly alongside callable support."""
         log_dir = tempfile.mkdtemp()
         app = App(
             log_dir=log_dir,
@@ -355,6 +373,7 @@ class TestCallableLogDir:
         assert len(log_files) == 1
 
     def test_callable_log_dir_that_raises_propagates(self):
+        """Test that an exception raised by the callable log_dir propagates during Runner init."""
         def bad_log_dir(runner):
             raise RuntimeError("cannot compute log dir")
 
