@@ -75,6 +75,9 @@ tests/
 ├── core/              # Tests for src/antkeeper/core/
 ├── channels/          # Tests for src/antkeeper/channels/
 │   └── test_slack_channel.py  # SlackChannel unit tests
+├── handlers/          # Tests for src/antkeeper/handlers/
+│   ├── test_claude_code.py    # Claude Code handler registration tests
+│   └── test_factories.py      # cc_handler factory unit tests
 ├── helpers/           # Tests for src/antkeeper/helpers/
 ├── llm/               # Tests for src/antkeeper/llm/
 ├── git/               # Tests for src/antkeeper/git/
@@ -263,6 +266,47 @@ Tests for state persistence (`tests/core/test_state_persistence.py`) verify:
 - State file contains correct JSON keys (run_id, workflow_name, handler additions)
 - State persisted after each `run_workflow()` step
 - Handlers can read persisted state mid-workflow to verify persistence timing
+
+### Handler Factory Testing Patterns
+
+Tests for the `cc_handler` factory (`tests/handlers/test_factories.py`) unit-test the factory in isolation by mocking the LLM layer.
+
+**Mock `run_prompt` at the factory module** — patch `antkeeper.handlers.claude_code.factories.run_prompt` (not the source module) to intercept LLM calls:
+
+```python
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
+def test_simple_mode_merges_updates_into_state(mock_rp, runner_factory):
+    h = cc_handler("/cmd", updates={"status": "done"})
+    runner, channel = runner_factory()
+    result = h(runner, {"x": 1})
+    assert result == {"x": 1, "status": "done"}
+```
+
+**Use `runner_factory()` with no arguments** — factory tests do not need a custom `App`, so `runner_factory()` (no args) is idiomatic. This creates a Runner bound to the default `app` fixture.
+
+**Mock `extract_json` for JSON mode** — when testing JSON mode, also patch `antkeeper.handlers.claude_code.factories.extract_json` to control parsed output without needing valid LLM responses:
+
+```python
+@patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"spec_file": "s.md", "slug": "foo", "extra": "ignored"})
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='...')
+def test_json_mode_extracts_only_named_fields(mock_rp, mock_ej, runner_factory):
+    h = cc_handler("/specify {prompt}", json_fields=["spec_file", "slug"])
+    runner, channel = runner_factory()
+    result = h(runner, {"prompt": "build something"})
+    assert "extra" not in result
+```
+
+**Validation tests need no Runner** — construction-time `ValueError` tests create the factory and assert immediately, without running the handler:
+
+```python
+def test_raises_when_both_updates_and_json_fields_provided():
+    with pytest.raises(ValueError, match="exactly one"):
+        cc_handler("/cmd", updates={"a": 1}, json_fields=["a"])
+```
+
+**Error handling tests expect `WorkflowFailedError`** — when `run_prompt` raises `AgentExecutionError`, or `extract_json` raises `ValueError`, or a state key is missing from the command format string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
+
+Tests cover: construction-time validation (both/neither args), label derivation (slash stripping, first token, explicit override), simple mode (state merge, command interpolation, progress messages), JSON mode (prompt wrapping, field extraction, progress messages), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), and edge cases (no placeholders, multiple placeholders, empty updates, single JSON field).
 
 ### Git Testing Patterns
 

@@ -1,6 +1,12 @@
 """HTTP package for Antkeeper server.
 
-Provides shared utilities for HTTP route handlers.
+This package provides shared utilities used by HTTP route handlers across the
+Antkeeper web server. It contains background task helpers that allow workflows
+to run asynchronously without blocking HTTP responses.
+
+Modules:
+    slack_events: Slack Events API payload handling with debounce and dispatch.
+    webhook: Webhook endpoint logic for triggering workflows via HTTP POST.
 """
 import sys
 

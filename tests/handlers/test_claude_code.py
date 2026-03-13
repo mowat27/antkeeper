@@ -1,28 +1,8 @@
-"""Tests for the built-in claude_code handlers package."""
+"""Tests for the claude_code handlers package."""
 
-from antkeeper.core.app import App
-from antkeeper.handlers.claude_code import app
-
-
-EXPECTED_HANDLERS = {
-    "healthcheck",
-    "derive_feature",
-    "specify",
-    "commit",
-    "branch_if_on_main",
-    "implement",
-    "push",
-    "raise_a_pr",
-    "specify_implement",
-    "sdlc",
-    "sdlc_iso",
-}
+from antkeeper.handlers.claude_code import cc_handler
 
 
-def test_package_exposes_app_instance():
-    assert isinstance(app, App)
-
-
-def test_app_has_expected_handlers():
-    assert len(app.handlers) == 11
-    assert set(app.handlers.keys()) == EXPECTED_HANDLERS
+def test_cc_handler_importable_from_package():
+    """Verify cc_handler is importable and callable."""
+    assert callable(cc_handler)

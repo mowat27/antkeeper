@@ -1,4 +1,10 @@
-"""Webhook endpoint logic for Antkeeper workflow triggers."""
+"""Webhook endpoint logic for Antkeeper workflow triggers.
+
+This module provides the Pydantic request/response models and handler function
+for the /webhook HTTP endpoint. Incoming POST requests specify a workflow by
+name and optional initial state; the workflow is executed asynchronously in the
+background and the caller receives an immediate response with a unique run ID.
+"""
 from typing import Any
 
 from fastapi import BackgroundTasks, HTTPException

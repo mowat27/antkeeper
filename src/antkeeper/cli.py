@@ -149,6 +149,11 @@ def main() -> None:
             --agents-file: Path to Python file containing the app
                 (default: handlers.py)
 
+        init: Scaffold a new Antkeeper project with the following options:
+            path: Directory in which to create handlers.py
+                (default: current directory). Exits with an error if
+                handlers.py already exists or the directory does not exist.
+
     Raises:
         SystemExit: Exit code 0 for success, 1 for errors (file not found,
             invalid arguments, workflow failure).
