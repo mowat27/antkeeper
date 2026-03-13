@@ -21,22 +21,22 @@ app = App()
 
 # --- Steps (factory-built) ---
 
-derive_feature = cc_handler("/derive_feature {prompt}", json_fields=["feature_type", "slug"])
+derive_feature = cc_handler("/derive_feature $prompt", state_updates=["feature_type", "slug"])
 app.add_handler(derive_feature)
 
-specify = cc_handler("/specify {prompt}", json_fields=["spec_file", "slug"])
+specify = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
 app.add_handler(specify)
 
-branch_if_on_main = cc_handler("/branch {spec_file}", json_fields=["branch_name"], label="branch_if_on_main")
+branch_if_on_main = cc_handler("/branch $spec_file", state_updates=["branch_name"], label="branch_if_on_main")
 app.add_handler(branch_if_on_main)
 
-implement = cc_handler("/implement {spec_file}", updates={"implement_status": "complete"})
+implement = cc_handler("/implement $spec_file")
 app.add_handler(implement)
 
-push = cc_handler("Push the current branch to the remote origin.", updates={"push_status": "complete"}, label="push")
+push = cc_handler("Push the current branch to the remote origin.", label="push")
 app.add_handler(push)
 
-raise_a_pr = cc_handler("Create a pull request for the current branch using gh pr create.", updates={"pr_status": "complete"}, label="raise_a_pr")
+raise_a_pr = cc_handler("Create a pull request for the current branch using gh pr create.", label="raise_a_pr")
 app.add_handler(raise_a_pr)
 
 

@@ -178,10 +178,13 @@ def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, Sta
         The final state after all steps have been executed.
     """
     runner.logger.info(f"run_workflow started with {len(steps)} steps: {[getattr(s, '__name__', repr(s)) for s in steps]}")
+    state = {**state, "_progress": {"total": len(steps), "completed": 0}}
     for step in steps:
         step_name = getattr(step, "__name__", repr(step))
         runner.logger.info(f"Executing step: {step_name}")
         state = step(runner, state)
+        progress = {**state["_progress"], "completed": state["_progress"]["completed"] + 1}
+        state = {**state, "_progress": progress}
         runner._persist_state(state)
         runner.logger.debug(f"Step completed: {step_name}, state keys: {list(state.keys())}")
     runner.logger.info("run_workflow completed")

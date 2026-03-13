@@ -328,6 +328,68 @@ class TestAppEnvironment:
         assert result["val"] == "plain_value"
 
 
+class TestWorkflowProgress:
+    """Tests for _progress tracking in run_workflow."""
+
+    def test_run_workflow_final_state_has_progress(self, app, runner_factory):
+        """Returned state has _progress == {"total": N, "completed": N}."""
+
+        def step_a(runner, state):
+            return {**state, "a": 1}
+
+        def step_b(runner, state):
+            return {**state, "b": 2}
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [step_a, step_b])
+
+        runner, source = runner_factory(app, "workflow", {})
+        result = runner.run()
+        assert result["_progress"] == {"total": 2, "completed": 2}
+
+    def test_run_workflow_progress_increments_per_step(self, app, runner_factory):
+        """A capturing handler verifies _progress["completed"] increments."""
+        captured = []
+
+        def capturing_step(runner, state):
+            captured.append(state["_progress"]["completed"])
+            return state
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [capturing_step, capturing_step, capturing_step])
+
+        runner, source = runner_factory(app, "workflow", {})
+        runner.run()
+        assert captured == [0, 1, 2]
+
+    def test_run_workflow_single_step_progress(self, app, runner_factory):
+        """Single step produces {"total": 1, "completed": 1}."""
+
+        def step(runner, state):
+            return state
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [step])
+
+        runner, source = runner_factory(app, "workflow", {})
+        result = runner.run()
+        assert result["_progress"] == {"total": 1, "completed": 1}
+
+    def test_single_handler_run_has_no_progress(self, app, runner_factory):
+        """Runner.run() directly produces no _progress key."""
+
+        @app.handler
+        def simple(runner, state):
+            return {**state, "done": True}
+
+        runner, source = runner_factory(app, "simple", {})
+        result = runner.run()
+        assert "_progress" not in result
+
+
 class TestCallableLogDir:
     """Tests for callable log_dir support in App."""
 
