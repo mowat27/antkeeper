@@ -8,34 +8,6 @@ is common in LLM outputs.
 import json as _json
 
 
-def json_prompt(prompt: str, *, required_fields: list[str]) -> str:
-    """Append JSON output instructions and an example object to a prompt.
-
-    Builds an example JSON object from the required field names and appends
-    instructions telling the LLM to respond with only a JSON object.
-
-    Args:
-        prompt: The original prompt text.
-        required_fields: Field names that must appear in the JSON response.
-
-    Returns:
-        The prompt with JSON instructions appended.
-    """
-    example = {field: f"<{field}>" for field in required_fields}
-    instruction = (
-        f"After running the command, return ONLY a JSON object: "
-        f"{_json.dumps(example)}"
-    )
-    if prompt.startswith("/"):
-        # When the prompt is a slash command, claude -p treats everything after
-        # the command name as $ARGUMENTS.  Appending the JSON instruction after
-        # \n\n causes it to be absorbed into $ARGUMENTS, where it becomes
-        # argument noise and is ignored by the LLM.  Placing the instruction
-        # before the command keeps it outside $ARGUMENTS expansion.
-        return f"{instruction}\n\n{prompt}"
-    return f"{prompt}\n\n{instruction}"
-
-
 def extract_json(text: str) -> dict:
     """Extract and parse a JSON object from text that may contain markdown fencing or prose.
 

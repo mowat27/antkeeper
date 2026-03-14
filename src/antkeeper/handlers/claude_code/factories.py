@@ -5,22 +5,42 @@ The ``cc_handler`` factory eliminates boilerplate by producing
 
 * **fire-and-forget** – run the LLM command, discard the response, return
   state unchanged.
-* **JSON** – wrap the command with ``json_prompt``, parse the response with
-  ``extract_json``, and merge the requested *state_updates* fields into state.
+* **delegation** – wrap the command with ``_delegation_prompt`` so a sub-agent
+  runs the command while the outer agent returns JSON.  Parse the response with
+  ``extract_json`` and merge the requested *state_updates* fields into state.
 
 An optional ``model`` argument allows overriding the LLM model on a
 per-handler basis.  When omitted, the model is read from ``state["model"]``
 at call time (i.e. the workflow-level default).
 """
 
+import json as _json
 import re
 from typing import Protocol
 
 from antkeeper.core.runner import Runner
 from antkeeper.core.domain import State
-from antkeeper.helpers.json import json_prompt, extract_json
+from antkeeper.helpers.json import extract_json
 from antkeeper.llm.claude_code import run_prompt
 from antkeeper.llm.errors import AgentExecutionError
+
+
+def _delegation_prompt(command: str, *, required_fields: list[str]) -> str:
+    """Build a prompt that delegates the command to a sub-agent and asks the outer agent to return JSON."""
+    example = {field: f"<{field}>" for field in required_fields}
+    return (
+        f"Use an agent to run the following command:\n"
+        f"\n"
+        f"{command}\n"
+        f"\n"
+        f"Wait for the agent to finish. Then, using the agent's output, "
+        f"return ONLY a JSON object with these fields — no other text, "
+        f"no markdown fences, no explanation:\n"
+        f"\n"
+        f"{_json.dumps(example)}\n"
+        f"\n"
+        f"Replace each placeholder with the actual value from the agent's output."
+    )
 
 
 class Handler(Protocol):
@@ -65,7 +85,7 @@ def cc_handler(
                 command,
             )
             if state_updates:
-                prompt = json_prompt(prompt, required_fields=state_updates)
+                prompt = _delegation_prompt(prompt, required_fields=state_updates)
             response = run_prompt(prompt, runner.logger, model=model if model is not None else state.get("model"))
             if state_updates:
                 parsed = extract_json(response)
