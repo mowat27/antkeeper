@@ -4,6 +4,7 @@ Tests the framework's ability to execute single handlers, multi-step workflows,
 error handling, and handler resolution.
 """
 
+import json
 import os
 import tempfile
 
@@ -377,6 +378,24 @@ class TestWorkflowProgress:
         runner, source = runner_factory(app, "workflow", {})
         result = runner.run()
         assert result["_progress"] == {"total": 1, "completed": 1}
+
+    def test_initial_progress_persisted_before_first_step(self, app, runner_factory):
+        """_progress with completed: 0 is on disk before the first step executes."""
+        captured_progress = {}
+
+        def step(runner, state):
+            with open(runner._state_path) as f:
+                persisted = json.load(f)
+            captured_progress.update(persisted["_progress"])
+            return state
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [step])
+
+        runner, source = runner_factory(app, "workflow", {})
+        runner.run()
+        assert captured_progress == {"total": 1, "completed": 0}
 
     def test_single_handler_run_has_no_progress(self, app, runner_factory):
         """Runner.run() directly produces no _progress key."""

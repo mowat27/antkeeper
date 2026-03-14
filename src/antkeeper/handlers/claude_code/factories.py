@@ -10,7 +10,7 @@ The ``cc_handler`` factory eliminates boilerplate by producing
 """
 
 import re
-from typing import Callable
+from typing import Protocol
 
 from antkeeper.core.runner import Runner
 from antkeeper.core.domain import State
@@ -19,12 +19,20 @@ from antkeeper.llm.claude_code import run_prompt
 from antkeeper.llm.errors import AgentExecutionError
 
 
+class Handler(Protocol):
+    """A handler callable with a ``__name__`` attribute."""
+
+    __name__: str
+
+    def __call__(self, runner: Runner, state: State, /) -> State: ...
+
+
 def cc_handler(
     command: str,
     *,
     state_updates: list[str] | None = None,
     label: str | None = None,
-) -> Callable[[Runner, State], State]:
+) -> Handler:
     """Build a handler that runs a Claude Code command and updates state.
 
     Args:

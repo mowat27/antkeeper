@@ -62,10 +62,11 @@ app = App()                              # defaults to ".antkeeper/state/"
 
 ### Persistence Points
 
-The `Runner` writes state to disk at three points:
+The `Runner` writes state to disk at four points:
 1. **Initial state creation** - After injecting `run_id` and `workflow_name` but before handler execution
-2. **After each workflow step** - When using `run_workflow()`, state is persisted after each step completes
-3. **Final state** - After the handler returns successfully
+2. **Before the first workflow step** - When using `run_workflow()`, `_progress` is initialized (with `completed: 0`) and persisted immediately, before any step executes. This guarantees external consumers reading state between workflow start and first-step completion always see `_progress`.
+3. **After each workflow step** - When using `run_workflow()`, state is persisted after each step completes (with `_progress.completed` incremented)
+4. **Final state** - After the handler returns successfully
 
 Each write overwrites the file with the latest state snapshot (one file per run).
 

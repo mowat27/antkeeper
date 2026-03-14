@@ -267,6 +267,14 @@ Tests for state persistence (`tests/core/test_state_persistence.py`) verify:
 - State persisted after each `run_workflow()` step
 - Handlers can read persisted state mid-workflow to verify persistence timing
 
+`TestWorkflowProgress` in `tests/core/test_workflows.py` covers `_progress` tracking behaviour:
+
+- **`test_run_workflow_final_state_has_progress`** — returned state has `_progress == {"total": N, "completed": N}` after all steps
+- **`test_run_workflow_progress_increments_per_step`** — a capturing step verifies `_progress["completed"]` increments correctly across steps (values seen are `[0, 1, 2]` for three steps)
+- **`test_run_workflow_single_step_progress`** — single step produces `{"total": 1, "completed": 1}`
+- **`test_initial_progress_persisted_before_first_step`** — reads the state file from disk inside the first step and asserts `_progress == {"total": 1, "completed": 0}`. This is the regression test for the bug where `_progress` was not persisted until after the first step completed. Uses `open(runner._state_path)` + `json.load()` directly to verify what is on disk, not just in memory.
+- **`test_single_handler_run_has_no_progress`** — `Runner.run()` used directly (without `run_workflow`) produces no `_progress` key
+
 ### Handler Factory Testing Patterns
 
 Tests for the `cc_handler` factory (`tests/handlers/test_factories.py`) unit-test the factory in isolation by mocking the LLM layer.

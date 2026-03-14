@@ -95,20 +95,31 @@ class Runner:
     def run(self) -> State:
         """Execute the workflow with initial state setup.
 
-        Sets up the initial state with run_id and workflow_name, then resolves
-        any callable values in ``app.env`` by calling each one with ``self``
-        (the Runner), and invokes the workflow handler inside an ``_app_env``
-        context so that the resolved environment variables are set in
-        ``os.environ`` for the duration of the handler and restored afterward.
-        Persists state before and after execution and logs the execution
-        lifecycle. Any exceptions during workflow execution are logged and
-        re-raised.
+        Execution order
+        ---------------
+        1. Merges ``channel.initial_state`` with framework keys ``run_id`` and
+           ``workflow_name`` to form the starting state.
+        2. Persists that state immediately via ``_persist_state`` so the state
+           file exists on disk before any handler logic runs.  This is important
+           for multi-step workflows that use ``run_workflow``, where ``_progress``
+           is written during step sequencing — the initial persist ensures the
+           file is present even in the event of an early failure.
+        3. Resolves any callable values in ``app.env`` by calling each one with
+           ``self`` (the Runner).
+        4. Invokes the workflow handler inside an ``_app_env`` context so that
+           resolved environment variables are exported to ``os.environ`` for the
+           duration of the handler and restored afterward.
+        5. Persists the final state returned by the handler.
+
+        Any exception raised by the workflow handler is logged and re-raised
+        unchanged so that the calling channel can handle it appropriately.
 
         Returns:
             The final state after workflow execution completes.
 
         Raises:
-            Exception: Any exception raised by the workflow handler is logged and re-raised.
+            Exception: Any exception raised by the workflow handler is logged
+                and re-raised.
         """
         state = {**self.channel.initial_state, "run_id": self.id, "workflow_name": self.workflow_name}
         self._persist_state(state)
@@ -153,8 +164,17 @@ class Runner:
         """Persist the current state to a JSON file.
 
         Writes the state dictionary to the state file path established during
-        Runner initialization. The state is written as formatted JSON for
-        readability.
+        ``__init__`` (``<state_dir>/<timestamp>-<run_id>.json``).  The file is
+        overwritten on each call so it always reflects the most recent snapshot.
+        State is written as indented JSON for human readability.
+
+        This method is called at several points during a run:
+
+        - By ``Runner.run()`` after building the initial state (before any
+          handler executes), ensuring the file exists on disk immediately.
+        - By ``run_workflow()`` after initialising ``_progress`` (before the
+          first step runs) and after each individual step completes.
+        - By ``Runner.run()`` again with the handler's final return value.
 
         Args:
             state: The state dictionary to persist.

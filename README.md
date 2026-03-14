@@ -270,7 +270,7 @@ The framework creates a log file and state file for each workflow run:
 
 Configure via `App(log_dir="path/", state_dir="path/")`. `log_dir` may be a callable `(runner) -> str` for per-handler dynamic directories (e.g. `lambda runner: f"logs/{runner.workflow_name}/{runner.id}"`). File naming ensures correlation between logs and state.
 
-Logs capture framework lifecycle events (runner init, workflow start/complete), handler execution (step names, state keys at DEBUG level), and errors. State is persisted as JSON after initial creation, after each `run_workflow()` step, and after final handler return.
+Logs capture framework lifecycle events (runner init, workflow start/complete), handler execution (step names, state keys at DEBUG level), and errors. State is persisted as JSON after initial creation, before the first `run_workflow()` step (with `_progress` initialized to `{"total": N, "completed": 0}`), after each `run_workflow()` step, and after final handler return.
 
 Access the logger in handlers via `runner.logger`:
 

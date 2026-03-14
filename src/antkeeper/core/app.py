@@ -165,20 +165,37 @@ class App:
 def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, State], State]]) -> State:
     """Execute a sequence of workflow steps with state threading.
 
-    Each step receives the runner and current state, processes it, and returns
-    an updated state that is passed to the next step. All steps are logged.
+    Each step receives the runner and the current state, processes it, and
+    returns an updated state that is forwarded to the next step (the
+    "state-threading" pattern).  All step transitions are logged.
+
+    Progress tracking
+    -----------------
+    Before the first step runs, a ``"_progress"`` key is inserted into state::
+
+        {"total": <number of steps>, "completed": 0}
+
+    The updated state — including ``_progress`` — is immediately persisted via
+    ``runner._persist_state``.  This means external observers (e.g. a polling
+    API endpoint) can read the progress counter from the state file even before
+    the first step has returned.  After each step completes, ``completed`` is
+    incremented by 1 and the state is persisted again.
 
     Args:
-        runner: The Runner instance executing the workflow.
-        state: The initial state dictionary.
-        steps: A list of callables that each accept (runner, state) and return
-               the updated state.
+        runner: The Runner instance executing the workflow.  Used for logging
+            and state persistence.
+        state: The current state dictionary passed into the step sequence.
+        steps: Ordered list of callables each accepting ``(runner, state)``
+            and returning the updated ``State``.
 
     Returns:
         The final state after all steps have been executed.
     """
     runner.logger.info(f"run_workflow started with {len(steps)} steps: {[getattr(s, '__name__', repr(s)) for s in steps]}")
+    # Initialise progress and persist immediately so the state file reflects
+    # the total step count before any step begins executing.
     state = {**state, "_progress": {"total": len(steps), "completed": 0}}
+    runner._persist_state(state)
     for step in steps:
         step_name = getattr(step, "__name__", repr(step))
         runner.logger.info(f"Executing step: {step_name}")
