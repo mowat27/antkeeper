@@ -95,13 +95,21 @@ The framework provides file-based Python logging via the `Runner`. Each workflow
 ### Configuration
 
 ```python
-app = App(log_dir="my/logs/")  # custom directory
-app = App()                     # defaults to "agents/logs/"
+from antkeeper import make_log_dir
+
+app = App(log_dir="my/logs/")          # custom static directory
+app = App()                             # defaults to "agents/logs/"
 
 # log_dir may also be a callable that receives the runner and returns a string.
 # The callable is evaluated once per handler invocation, before the log file is created.
 app = App(log_dir=lambda runner: f"logs/{runner.workflow_name}/{runner.id}")
+
+# Use make_log_dir() for the standard timestamped-per-run pattern:
+app = App(log_dir=make_log_dir("agents/logs"))
+# Produces: "agents/logs/20260314120000-a1b2c3d4/"
 ```
+
+`make_log_dir(base_dir)` returns a callable `(runner) -> str` that generates `"{base_dir}/{timestamp}-{runner.id}/"`. The timestamp is captured at invocation time (when the Runner initialises), not when `make_log_dir` is called.
 
 When `log_dir` is a callable it is resolved inside `Runner.__init__`, so `runner.id` and `runner.channel` (including `runner.workflow_name`) are available. State is not yet available at that point — `log_dir` is infrastructure set up before the handler runs.
 
@@ -364,7 +372,9 @@ Cwd changes are process-wide. The context manager is designed for single-threade
 Follow the log file naming convention for correlation:
 
 ```python
-worktree_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{runner.id}"
+from antkeeper import make_timestamp
+
+worktree_name = f"{make_timestamp()}-{runner.id}"
 # Example: "20260207143000-a1b2c3d4"
 ```
 

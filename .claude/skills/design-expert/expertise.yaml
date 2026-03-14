@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-14
+# Last validated: 2026-03-14 (feat/add-timestamp-funcs)
 
 overview:
   name: antkeeper
@@ -105,11 +105,12 @@ architecture:
     - name: helpers
       path: src/antkeeper/helpers/
       responsibility: >
-        Shared utility functions. Contains JSON extraction and JSON prompt building
-        for parsing/instructing LLM responses that embed JSON in markdown or prose.
+        Shared utility functions. Contains JSON extraction, JSON prompt building,
+        and timestamp/log-directory helpers for handler code.
       modules:
-        - __init__.py  # Re-exports extract_json and json_prompt via __all__
+        - __init__.py  # Re-exports extract_json, json_prompt, make_timestamp, make_log_dir via __all__
         - json.py  # extract_json — finds first {…} in text, parses as JSON; json_prompt — appends JSON output instructions to a prompt
+        - timestamps.py  # make_timestamp — current time as YYYYMMDDHHmmss string; make_log_dir — factory returning callable (runner) -> log dir path
 
     - name: http
       path: src/antkeeper/http/
@@ -145,8 +146,8 @@ architecture:
       responsibility: >
         Package-level re-exports. Exports all major public types via __all__:
         App, Runner, run_workflow, State, Channel, WorkflowFailedError,
-        CliChannel, ApiChannel, SlackChannel, Worktree, git_worktree.
-        Allows users to import from antkeeper directly.
+        CliChannel, ApiChannel, SlackChannel, Worktree, git_worktree,
+        make_log_dir, make_timestamp. Allows users to import from antkeeper directly.
 
     - name: package_main
       path: src/antkeeper/__main__.py
@@ -446,6 +447,24 @@ helper_functions:
       Builds example dict {field: '<field>'} for each required field, appends
       "return ONLY a JSON object: ..." instruction. Used by cc_handler to
       instruct the LLM to respond with structured JSON.
+
+  make_timestamp:
+    file: src/antkeeper/helpers/timestamps.py
+    signature: "make_timestamp() -> str"
+    responsibility: >
+      Returns current time as a 14-character YYYYMMDDHHmmss string using
+      datetime.now().strftime. Re-exported from antkeeper/__init__.py and
+      antkeeper/helpers/__init__.py.
+
+  make_log_dir:
+    file: src/antkeeper/helpers/timestamps.py
+    signature: "make_log_dir(base_dir: str) -> Callable[[Runner], str]"
+    responsibility: >
+      Factory that returns a callable compatible with App(log_dir=...).
+      The returned callable accepts a Runner and produces
+      "{base_dir}/{make_timestamp()}-{runner.id}/". Timestamp is captured
+      at invocation time (not factory time). Re-exported from antkeeper/__init__.py
+      and antkeeper/helpers/__init__.py.
 
 handler_factories:
   cc_handler:
@@ -800,6 +819,7 @@ testing_design:
     - tests/test_slack_server.py — Slack event endpoint (url_verification, bot filter, mention, edit, reply, delete, timer dispatch, unknown workflow, dedup, env var validation)
     - tests/llm/test_claude_code_agent.py — ClaudeCodeAgent subprocess and error handling
     - tests/helpers/test_extract_json.py — JSON extraction from LLM responses
+    - tests/helpers/test_timestamps.py — make_timestamp format, make_log_dir returns callable, produces correct path, timestamp captured at call time
     - tests/git/test_worktree.py — Worktree class (path, exists, create, create+branch, remove, errors)
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling

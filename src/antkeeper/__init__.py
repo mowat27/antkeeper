@@ -11,6 +11,7 @@ from antkeeper.channels.cli import CliChannel
 from antkeeper.channels.api import ApiChannel
 from antkeeper.channels.slack import SlackChannel
 from antkeeper.git import Worktree, git_worktree
+from antkeeper.helpers.timestamps import make_log_dir, make_timestamp
 
 __all__ = [
     "App",
@@ -24,4 +25,6 @@ __all__ = [
     "SlackChannel",
     "Worktree",
     "git_worktree",
+    "make_log_dir",
+    "make_timestamp",
 ]
