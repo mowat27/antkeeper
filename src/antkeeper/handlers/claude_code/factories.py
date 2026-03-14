@@ -7,6 +7,10 @@ The ``cc_handler`` factory eliminates boilerplate by producing
   state unchanged.
 * **JSON** – wrap the command with ``json_prompt``, parse the response with
   ``extract_json``, and merge the requested *state_updates* fields into state.
+
+An optional ``model`` argument allows overriding the LLM model on a
+per-handler basis.  When omitted, the model is read from ``state["model"]``
+at call time (i.e. the workflow-level default).
 """
 
 import re
@@ -32,6 +36,7 @@ def cc_handler(
     *,
     state_updates: list[str] | None = None,
     label: str | None = None,
+    model: str | None = None,
 ) -> Handler:
     """Build a handler that runs a Claude Code command and updates state.
 
@@ -42,6 +47,8 @@ def cc_handler(
             command and returns state unchanged (fire-and-forget mode).
         label: Human-readable label for progress messages. Defaults to the first
             token of *command* with any leading ``/`` stripped.
+        model: LLM model identifier. When provided, overrides the model from
+            state. Defaults to ``state.get("model")``.
 
     Returns:
         A handler function with signature ``(Runner, State) -> State``.
@@ -59,7 +66,7 @@ def cc_handler(
             )
             if state_updates:
                 prompt = json_prompt(prompt, required_fields=state_updates)
-            response = run_prompt(prompt, runner.logger, model=state.get("model"))
+            response = run_prompt(prompt, runner.logger, model=model if model is not None else state.get("model"))
             if state_updates:
                 parsed = extract_json(response)
                 result = {k: parsed[k] for k in state_updates}

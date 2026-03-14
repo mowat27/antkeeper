@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-14 (feat/add-timestamp-funcs)
+# Last validated: 2026-03-14 (feat/cc-handler-model-override)
 
 overview:
   name: antkeeper
@@ -95,12 +95,12 @@ architecture:
       path: src/antkeeper/handlers/
       responsibility: >
         Pre-built handler packages. Currently contains the claude_code subpackage,
-        which provides a factory and a module-level App with 11 registered handlers
-        for SDLC workflows backed by ClaudeCodeAgent.
+        which provides the cc_handler factory for building LLM-backed workflow handlers.
+        Users build their own App and register handlers via add_handler() or @app.handler.
       modules:
         - __init__.py
-        - claude_code/__init__.py  # App with registered SDLC handlers; import app.handlers into your own App
-        - claude_code/factories.py  # cc_handler factory
+        - claude_code/__init__.py  # Re-exports cc_handler from factories.py
+        - claude_code/factories.py  # cc_handler factory (fire-and-forget and JSON modes)
 
     - name: helpers
       path: src/antkeeper/helpers/
@@ -469,47 +469,45 @@ helper_functions:
 handler_factories:
   cc_handler:
     file: src/antkeeper/handlers/claude_code/factories.py
-    signature: "cc_handler(command: str, *, updates: dict[str, Any] | None = None, json_fields: list[str] | None = None, label: str | None = None) -> Callable[[Runner, State], State]"
+    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None) -> Handler"
+    returns: "Handler Protocol — callable (Runner, State) -> State with __name__ attribute"
     responsibility: >
       Factory producing (Runner, State) -> State handler functions in two modes:
-      simple mode (updates provided) and JSON mode (json_fields provided).
-      Exactly one of updates or json_fields must be provided — raises ValueError otherwise.
+      fire-and-forget mode (state_updates absent or empty) and JSON mode (state_updates
+      contains field names). An optional model argument overrides the LLM model per-handler.
     behavior:
       label_derivation: "Default label = first token of command with leading '/' stripped. Custom label overrides."
-      handler.__name__: "Set to label for framework introspection."
-      simple_mode: >
-        Interpolates command with state via format_map, calls run_prompt,
-        merges static updates dict into state.
+      handler.__name__: "Set to label for framework introspection (compatible with app.add_handler())."
+      interpolation: >
+        $var placeholders are substituted from state via regex at call time:
+        re.sub(r'\$([a-zA-Z_]\w*)', lambda m: str(state[m.group(1)]), command).
+        ${var} brace form is intentionally NOT interpolated — passes through as literal text.
+        Missing state key raises KeyError, caught and routed to runner.fail().
+      fire_and_forget_mode: >
+        When state_updates is None or empty: runs interpolated command via run_prompt,
+        returns state unchanged. No JSON parsing.
       json_mode: >
-        Interpolates command, wraps with json_prompt(required_fields=json_fields),
-        calls run_prompt, calls extract_json on response, picks only json_fields
-        from parsed dict, merges into state.
+        When state_updates is non-empty: wraps interpolated command with
+        json_prompt(required_fields=state_updates), calls run_prompt, calls extract_json
+        on response, picks only the listed fields from parsed dict, merges into state.
+        Missing field in response raises KeyError, caught and routed to runner.fail().
+      model_resolution: >
+        model=model if model is not None else state.get("model"). Factory-level model
+        takes precedence over state['model']. When neither is set, run_prompt receives
+        model=None (uses ClaudeCodeAgent default).
       error_handling: >
-        KeyError (missing state key), AgentExecutionError (LLM failure),
-        and ValueError (bad JSON or missing field) all call runner.fail()
-        which raises WorkflowFailedError.
-      progress: "Reports 'Running {label}' and '{label} complete' via runner.report_progress."
+        Single try/except catches KeyError (missing state key or JSON field),
+        AgentExecutionError (LLM failure), and ValueError (bad JSON).
+        All route to runner.fail(f"{label} failed: {error}") -> WorkflowFailedError.
+      progress: "Reports 'Running {label}' before and '{label} complete' after via runner.report_progress."
 
-  handlers_package_app:
+  handlers_package_exports:
     file: src/antkeeper/handlers/claude_code/__init__.py
     purpose: >
-      Module-level App instance with 11 pre-registered SDLC handlers. Import
-      app.handlers into your own App via App(handlers=claude_code_app.handlers)
-      to reuse these handlers without re-defining them.
-    factory_built_handlers:
-      - "derive_feature: cc_handler('/derive_feature {prompt}', json_fields=['feature_type', 'slug'])"
-      - "specify: cc_handler('/specify {prompt}', json_fields=['spec_file', 'slug'])"
-      - "branch_if_on_main: cc_handler('/branch {spec_file}', json_fields=['branch_name'], label='branch_if_on_main')"
-      - "implement: cc_handler('/implement {spec_file}', updates={'implement_status': 'complete'})"
-      - "push: cc_handler('Push the current branch...', updates={'push_status': 'complete'}, label='push')"
-      - "raise_a_pr: cc_handler('Create a pull request...', updates={'pr_status': 'complete'}, label='raise_a_pr')"
-    hand_written_handlers:
-      - "healthcheck: asks Claude for a short poem, returns {poem}"
-      - "commit: runs /commit, calls latest_commit(), returns {last_commit: {sha, message}}"
-    workflows:
-      - "specify_implement: run_workflow([specify, implement])"
-      - "sdlc: run_workflow([specify, branch_if_on_main, commit, implement, commit, push, raise_a_pr])"
-      - "sdlc_iso: derive_feature -> create worktree on {feature_type}/{slug} branch -> run_workflow([specify, commit, implement, commit, push, raise_a_pr]) -> return state + worktree_path + branch_name"
+      Re-exports cc_handler from factories.py. No App instance or pre-registered
+      handlers — users build their own App and register handlers via add_handler()
+      or the @app.handler decorator.
+    exports: ["cc_handler"]
 
 channel_implementations:
   CliChannel:
@@ -718,10 +716,12 @@ http_modules:
 
 handlers_package:
   note: >
-    The canonical handler implementations live in src/antkeeper/handlers/claude_code/.
+    The canonical handler factory lives in src/antkeeper/handlers/claude_code/factories.py.
     See handler_factories section above for full detail. There is no top-level
-    handlers.py in the framework source; users create their own handlers file
-    (default: handlers.py) that imports from antkeeper.handlers.claude_code.
+    handlers.py or pre-built App in the framework source; users create their own
+    handlers file (default: handlers.py) that imports cc_handler from
+    antkeeper.handlers.claude_code and registers handlers via app.add_handler()
+    or @app.handler.
 
 data_flow:
   cli_happy_path:
@@ -742,11 +742,14 @@ data_flow:
     - "Background task calls runner.run() -> workflow executes asynchronously"
     - "Progress/error output goes to Uvicorn logs (stdout/stderr)"
   llm_path:
-    - "Handler extracts prompt and model from state"
-    - "Creates ClaudeCodeAgent(model=state.get('model'))"
-    - "Calls agent.prompt('/<command> <prompt>')"
+    - "cc_handler factory builds handler with command, state_updates, label, model captured in closure"
+    - "Handler interpolates $var placeholders from state via regex"
+    - "If state_updates: wraps command with json_prompt; otherwise uses raw command"
+    - "Calls run_prompt(prompt, runner.logger, model=model if model is not None else state.get('model'))"
+    - "run_prompt creates ClaudeCodeAgent(model=model, yolo=True), calls agent.prompt()"
     - "Agent runs subprocess `claude -p` -> stdout returned"
-    - "Handler spreads state + {result: response}"
+    - "If state_updates: extract_json parses response, picks listed fields, merges into state"
+    - "If fire-and-forget: returns state unchanged"
   worktree_iso_path:
     - "sdlc_iso calls derive_feature to get feature_type and slug"
     - "Creates Worktree(base_dir=runner.app.worktree_dir, name='{timestamp}-{run_id}')"
@@ -824,7 +827,7 @@ testing_design:
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler construction validation, label derivation, simple mode (state merge, interpolation, progress), JSON mode (field extraction, prompt wrapping, progress), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field), edge cases (no placeholders, multiple placeholders, empty updates, single JSON field)
+    - tests/handlers/test_factories.py — cc_handler: label derivation (default strips slash, first token, custom override), JSON mode (extracts only named fields, wraps with json_prompt, progress messages, single field), fire-and-forget mode (returns state unchanged, empty list is fire-and-forget, progress messages), $var interpolation (substitution, multiple vars, no vars passthrough, non-string str() conversion, ${var} not interpolated), model override (factory model passed to run_prompt, factory beats state model, fallback to state when no override), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field)
 
 key_design_decisions:
   - >
@@ -863,11 +866,14 @@ key_design_decisions:
     Per-run file logging. Each Runner creates an isolated log file. No console
     logging from the framework. Module-level loggers provide debug tracing.
   - >
-    Pre-built handler package. src/antkeeper/handlers/claude_code/ provides a
-    ready-made App with 11 SDLC handlers. The cc_handler factory in factories.py
-    eliminates boilerplate for handlers that run an LLM command and update state
-    (simple mode) or parse JSON from the response (JSON mode). Handlers built by
-    the factory have __name__ set to their label for framework introspection.
+    cc_handler factory. src/antkeeper/handlers/claude_code/factories.py provides
+    cc_handler, a factory that eliminates boilerplate for handlers that run an LLM
+    command and either return state unchanged (fire-and-forget) or parse named fields
+    from a JSON response (state_updates mode). An optional model keyword argument
+    pins the LLM model at factory time, overriding state['model'] when provided.
+    Handlers built by the factory have __name__ set to their label for use with
+    app.add_handler(). The claude_code __init__.py re-exports cc_handler only —
+    there is no pre-built App or pre-registered handlers.
   - >
     Git worktree isolation. The sdlc_iso handler creates a git worktree for
     each run, branching on {feature_type}/{slug}. This enables parallel

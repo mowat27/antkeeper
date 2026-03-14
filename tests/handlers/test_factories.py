@@ -5,6 +5,8 @@ Covers:
     - state_updates mode: prompt wrapping, field extraction, and progress messages.
     - Fire-and-forget mode (no state_updates): runs command, returns state unchanged.
     - $var interpolation from state.
+    - Model override: per-handler ``model`` argument takes precedence over the
+      state model; absence of override falls back to ``state["model"]``.
     - Error handling: AgentExecutionError, bad JSON, missing state keys, and
       missing JSON fields all cause runner.fail() / WorkflowFailedError.
     - Edge cases: no placeholders, multiple placeholders, empty list, ${var} literal.
@@ -172,6 +174,38 @@ def test_dollar_brace_var_not_interpolated(mock_rp, runner_factory):
     runner, channel = runner_factory()
     h(runner, {"spec_file": "s.md"})
     mock_rp.assert_called_once_with("/cmd ${spec_file}", runner.logger, model=None)
+
+
+# ---------------------------------------------------------------------------
+# model override
+# ---------------------------------------------------------------------------
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
+def test_model_override_passed_to_run_prompt(mock_rp, runner_factory):
+    """Factory model override is passed to run_prompt when state has no model."""
+    h = cc_handler("/cmd", model="claude-opus-4")
+    runner, channel = runner_factory()
+    h(runner, {})
+    mock_rp.assert_called_once_with("/cmd", runner.logger, model="claude-opus-4")
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
+def test_model_override_beats_state_model(mock_rp, runner_factory):
+    """Factory model override takes precedence over state model."""
+    h = cc_handler("/cmd", model="claude-opus-4")
+    runner, channel = runner_factory()
+    h(runner, {"model": "claude-sonnet-4"})
+    mock_rp.assert_called_once_with("/cmd", runner.logger, model="claude-opus-4")
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
+def test_no_model_override_falls_back_to_state(mock_rp, runner_factory):
+    """When no factory model override, state model is used."""
+    h = cc_handler("/cmd")
+    runner, channel = runner_factory()
+    h(runner, {"model": "claude-sonnet-4"})
+    mock_rp.assert_called_once_with("/cmd", runner.logger, model="claude-sonnet-4")
 
 
 # ---------------------------------------------------------------------------
