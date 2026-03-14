@@ -63,13 +63,15 @@ def test_state_updates_extracts_only_named_fields(mock_rp, mock_ej, runner_facto
 
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"spec_file": "s.md", "slug": "foo"})
 @patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='{}')
-def test_state_updates_wraps_prompt_with_json_prompt(mock_rp, mock_ej, runner_factory):
-    """state_updates mode passes the command through json_prompt, appending JSON instructions."""
+def test_state_updates_uses_delegation_prompt(mock_rp, mock_ej, runner_factory):
+    """state_updates mode wraps the command in a delegation prompt containing all required fields."""
     h = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
     runner, channel = runner_factory()
     h(runner, {"prompt": "build it"})
     call_args = mock_rp.call_args[0][0]
-    assert "JSON" in call_args  # json_prompt appends JSON instructions
+    assert "Use an agent to run the following command" in call_args
+    assert "spec_file" in call_args
+    assert "slug" in call_args
 
 
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"branch_name": "feat/x"})
