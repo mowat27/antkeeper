@@ -88,7 +88,8 @@ src/antkeeper/
 │       ├── __init__.py # 11 registered handlers + module-level app instance
 │       └── factories.py # cc_handler factory for building handlers without boilerplate
 ├── helpers/
-│   └── json.py         # JSON extraction utilities
+│   ├── json.py         # JSON extraction utilities
+│   └── timestamps.py   # make_timestamp() and make_log_dir() utilities
 ├── llm/                # LLM agent abstraction layer
 │   ├── __init__.py     # Agent protocol
 │   ├── errors.py       # AgentExecutionError
@@ -152,6 +153,7 @@ Create a Python file with an `App` instance and decorated handlers:
 from antkeeper.core.app import App, run_workflow
 from antkeeper.core.runner import Runner
 from antkeeper.core.domain import State
+from antkeeper import make_timestamp, make_log_dir
 
 app = App()  # Defaults: log_dir="agents/logs/", worktree_dir="trees/", state_dir=".antkeeper/state/"
 # Or configure: App(log_dir="my/logs/", worktree_dir="worktrees/", state_dir=".antkeeper/state/")
@@ -163,6 +165,8 @@ app = App()  # Defaults: log_dir="agents/logs/", worktree_dir="trees/", state_di
 #     The callable receives the runner and is evaluated per handler invocation
 # log_dir may also be a callable: App(log_dir=lambda runner: f"logs/{runner.workflow_name}/{runner.id}")
 #   - Evaluated once per handler invocation, before the log file is created
+# Use make_log_dir() for the standard timestamped per-run pattern:
+#   App(log_dir=make_log_dir("agents/logs"))  → "agents/logs/20260314120000-a1b2c3d4/"
 
 @app.handler
 def my_step(runner: Runner, state: State) -> State:
@@ -230,7 +234,7 @@ Handlers can use git utilities:
 
 ```python
 from antkeeper.git import execute, current, GitCommandError, Worktree, git_worktree
-from datetime import datetime
+from antkeeper import make_timestamp
 
 @app.handler
 def git_operations(runner: Runner, state: State) -> State:
@@ -250,7 +254,7 @@ def git_operations(runner: Runner, state: State) -> State:
 
 @app.handler
 def isolated_workflow(runner: Runner, state: State) -> State:
-    worktree_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{runner.id}"
+    worktree_name = f"{make_timestamp()}-{runner.id}"
     wt = Worktree(base_dir=runner.app.worktree_dir, name=worktree_name)
 
     with git_worktree(wt, create=True, branch="feat/new", remove=False):
@@ -268,7 +272,7 @@ The framework creates a log file and state file for each workflow run:
 - **Log file**: `{log_dir}/{timestamp}-{run_id}.log` (default: `agents/logs/`)
 - **State file**: `{state_dir}/{timestamp}-{run_id}.json` (default: `.antkeeper/state/`)
 
-Configure via `App(log_dir="path/", state_dir="path/")`. `log_dir` may be a callable `(runner) -> str` for per-handler dynamic directories (e.g. `lambda runner: f"logs/{runner.workflow_name}/{runner.id}"`). File naming ensures correlation between logs and state.
+Configure via `App(log_dir="path/", state_dir="path/")`. `log_dir` may be a callable `(runner) -> str` for per-handler dynamic directories (e.g. `lambda runner: f"logs/{runner.workflow_name}/{runner.id}"`, or use `make_log_dir("agents/logs")` for the standard timestamped per-run pattern). File naming ensures correlation between logs and state.
 
 Logs capture framework lifecycle events (runner init, workflow start/complete), handler execution (step names, state keys at DEBUG level), and errors. State is persisted as JSON after initial creation, before the first `run_workflow()` step (with `_progress` initialized to `{"total": N, "completed": 0}`), after each `run_workflow()` step, and after final handler return.
 
@@ -340,7 +344,7 @@ just test    # Tests
 uv run -m pytest tests/ -v
 ```
 
-Tests are organized to mirror the source layout (`tests/core/`, `tests/channels/`, `tests/handlers/`, `tests/llm/`, `tests/git/`). Each test owns its setup using shared fixtures from `tests/conftest.py`. The `app` fixture provides log, worktree, and state isolation via temp directories. Git-specific tests use the `git_repo` fixture from `tests/git/conftest.py`.
+Tests are organized to mirror the source layout (`tests/core/`, `tests/channels/`, `tests/handlers/`, `tests/helpers/`, `tests/llm/`, `tests/git/`). Each test owns its setup using shared fixtures from `tests/conftest.py`. The `app` fixture provides log, worktree, and state isolation via temp directories. Git-specific tests use the `git_repo` fixture from `tests/git/conftest.py`. Helper tests (`tests/helpers/`) are pure unit tests with no Runner or fixtures — they patch `datetime` at the module level for deterministic timestamp assertions.
 
 ### Navigating the Codebase
 

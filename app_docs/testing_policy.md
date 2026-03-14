@@ -79,6 +79,7 @@ tests/
 │   ├── test_claude_code.py    # Claude Code handler registration tests
 │   └── test_factories.py      # cc_handler factory unit tests
 ├── helpers/           # Tests for src/antkeeper/helpers/
+│   └── test_timestamps.py     # make_timestamp() and make_log_dir() unit tests
 ├── llm/               # Tests for src/antkeeper/llm/
 ├── git/               # Tests for src/antkeeper/git/
 │   ├── conftest.py    # git_repo fixture
@@ -315,6 +316,53 @@ def test_raises_when_both_updates_and_json_fields_provided():
 **Error handling tests expect `WorkflowFailedError`** — when `run_prompt` raises `AgentExecutionError`, or `extract_json` raises `ValueError`, or a state key is missing from the command format string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
 
 Tests cover: construction-time validation (both/neither args), label derivation (slash stripping, first token, explicit override), simple mode (state merge, command interpolation, progress messages), JSON mode (prompt wrapping, field extraction, progress messages), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), and edge cases (no placeholders, multiple placeholders, empty updates, single JSON field).
+
+### Helper Testing Patterns
+
+Tests for `antkeeper.helpers` utilities (`tests/helpers/`) are pure unit tests with no fixtures and no Runner involvement.
+
+**Patch `datetime` at the module under test** — to make timestamp assertions deterministic, patch `antkeeper.helpers.timestamps.datetime` (not `datetime.datetime`) so `datetime.now()` returns a fixed value:
+
+```python
+from datetime import datetime
+from unittest.mock import patch
+from antkeeper.helpers.timestamps import make_timestamp, make_log_dir
+
+FIXED_DT = datetime(2026, 3, 14, 9, 5, 7)
+
+def test_make_timestamp_format():
+    with patch("antkeeper.helpers.timestamps.datetime") as mock_dt:
+        mock_dt.now.return_value = FIXED_DT
+        assert make_timestamp() == "20260314090507"
+```
+
+**Mock the runner with `Mock(spec=Runner, id=...)`** — `make_log_dir` only needs `runner.id`, so a `Mock(spec=Runner)` is the right double. No `runner_factory` or `App` is needed:
+
+```python
+from unittest.mock import Mock, patch
+from antkeeper.core.runner import Runner
+from antkeeper.helpers.timestamps import make_log_dir
+
+def test_make_log_dir_produces_correct_path():
+    with patch("antkeeper.helpers.timestamps.datetime") as mock_dt:
+        mock_dt.now.return_value = FIXED_DT
+        mock_runner = Mock(spec=Runner, id="abc123")
+        log_dir_fn = make_log_dir("/var/logs")
+        assert log_dir_fn(mock_runner) == "/var/logs/20260314090507-abc123/"
+```
+
+**Verify timestamp is captured at call time, not factory time** — to test lazy evaluation, obtain the callable first (before patching), then patch and invoke:
+
+```python
+def test_make_log_dir_uses_timestamp_at_call_time():
+    log_dir_fn = make_log_dir("out")  # create before patching
+    with patch("antkeeper.helpers.timestamps.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2099, 12, 31, 23, 59, 59)
+        mock_runner = Mock(spec=Runner, id="run1")
+        assert log_dir_fn(mock_runner) == "out/20991231235959-run1/"
+```
+
+Tests cover: timestamp format (`YYYYMMDDHHmmss`, 14 characters), `make_log_dir` returns a callable, correct path construction (base dir + timestamp + runner.id + trailing slash), and lazy timestamp evaluation.
 
 ### Git Testing Patterns
 
