@@ -19,11 +19,21 @@ class WorkflowFailedError(Exception):
 
 
 type State = dict[str, Any]
-"""State represents workflow data as a dictionary of key-value pairs.
+"""Workflow data represented as a plain dictionary.
 
-Handlers receive State as input and return a new State as output. State
-should be treated as immutable - always return a new copy with updates
-rather than modifying in place.
+Handlers receive a ``State`` as input and must return a new ``State`` as
+output.  State should be treated as immutable — always construct a new dict
+with updates (e.g. ``{**state, "key": value}``) rather than modifying in
+place.
+
+Framework-reserved keys (written by the runner and helpers, not by handlers
+directly):
+
+- ``"run_id"``: unique 8-character hex identifier for the current execution.
+- ``"workflow_name"``: name of the workflow being executed.
+- ``"_progress"``: ``{"total": int, "completed": int}`` inserted by
+  ``run_workflow`` before the first step executes and updated after each
+  subsequent step.
 """
 
 

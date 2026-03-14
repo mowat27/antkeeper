@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-10
+# Last validated: 2026-03-14
 
 overview:
   name: antkeeper
@@ -162,12 +162,17 @@ architecture:
 
   state_persistence: >
     Automatic JSON-based state snapshots. Runner writes state to
-    <app.state_dir>/<timestamp>-<id>.json. State is persisted at three points:
-    (1) before workflow execution (initial state with run_id/workflow_name),
-    (2) after each run_workflow step completes, and (3) after workflow execution
-    completes (final state). The state file and log file share the same
-    <timestamp>-<id> base name for easy correlation. State files use formatted
-    JSON (indent=2) for human readability.
+    <app.state_dir>/<timestamp>-<id>.json. State is persisted at four points:
+    (1) before workflow execution — initial state with run_id/workflow_name,
+    (2) when run_workflow begins — initial state plus _progress: {total, completed: 0}
+    (written before the first step executes, enabling external observers to read
+    progress before any work begins),
+    (3) after each run_workflow step completes — state with incremented _progress.completed,
+    (4) after workflow execution completes — final state.
+    The state file and log file share the same <timestamp>-<id> base name for
+    easy correlation. State files use formatted JSON (indent=2) for human readability.
+    Workflows that do NOT use run_workflow (single direct handlers) have no _progress
+    key in their state.
 
 domain_types:
   WorkflowFailedError:
@@ -255,7 +260,7 @@ core_objects:
       - "logger: logging.Logger  # per-run file logger (antkeeper.run.<id>)"
       - "_state_path: str  # absolute path to per-run state JSON file"
     interface:
-      - "run() -> State  # merges channel.initial_state with run_id/workflow_name, persists state before/after workflow, calls workflow"
+      - "run() -> State  # merges channel.initial_state with run_id/workflow_name, persists state before workflow, calls workflow, persists final state after"
       - "_persist_state(state: State) -> None  # writes state dict to _state_path as formatted JSON"
       - "workflow_name: property  # delegates to channel.workflow_name"
       - "workflow: property  # resolves handler via app.get_handler(workflow_name)"
@@ -271,9 +276,10 @@ core_objects:
       console output. run() resolves callable env values: if app.env is non-empty,
       iterates values calling v(self) for callables and keeping static values,
       producing a resolved dict passed to _app_env(). Callable errors propagate
-      before _app_env is entered. run() persists state before and after workflow
-      execution via _persist_state(). run_workflow() also calls _persist_state()
-      after each step completes, enabling mid-workflow state recovery. fail()
+      before _app_env is entered. run() persists initial state before calling
+      the workflow handler; run_workflow() then persists with _progress before
+      the first step executes, and after each step; run() persists once more
+      after the handler returns. fail()
       raises WorkflowFailedError instead of calling exit(1) — this allows CLI
       and API to handle failures differently (CLI exits, API continues serving).
 
@@ -282,9 +288,20 @@ core_objects:
     signature: "run_workflow(runner: Runner, state: State, steps: list[Callable]) -> State"
     responsibility: >
       Sequential composition helper. Folds state through a list of handler
-      callables. Logs step names and completion via runner.logger. Persists
-      state to disk (via runner._persist_state) after each step completes,
-      enabling mid-workflow state inspection and recovery.
+      callables. Logs step names and completion via runner.logger.
+    progress_tracking: >
+      Before the first step, inserts _progress: {"total": len(steps), "completed": 0}
+      into state and immediately calls runner._persist_state(). This means the state
+      file on disk reflects the total step count before any handler runs — external
+      observers (e.g. polling API) can read progress from the state file immediately.
+      After each step completes, increments _progress.completed by 1 and persists again.
+      The _progress key is part of the returned state. Single direct handler invocations
+      (not using run_workflow) produce no _progress key.
+    persistence_order:
+      - "1. Insert _progress + persist (before first step)"
+      - "2. Execute step"
+      - "3. Increment _progress.completed + persist (after each step)"
+      - "4. Return final state (Runner.run() persists once more)"
 
 git_objects:
   GitCommandError:
@@ -772,7 +789,7 @@ testing_design:
     Tests organized into subdirectories mirroring src layout.
   test_files:
     - tests/core/test_app.py — App constructor tests (handlers param, add_handler, env param storage and defaults)
-    - tests/core/test_workflows.py — core engine paths (single, multi-step, failure raises WorkflowFailedError, unknown) + TestAppEnvironment class (env var setting, str conversion, restoration after success/failure, existing var preservation, noop for None/empty, invalid str propagation, run_workflow step visibility, callable env values resolved with runner, mixed callable/static env, callable errors propagate) + TestCallableLogDir class (callable log_dir resolves with runner, static still works, callable errors propagate)
+    - tests/core/test_workflows.py — core engine paths (single, multi-step, failure raises WorkflowFailedError, unknown) + TestAppEnvironment class (env var setting, str conversion, restoration after success/failure, existing var preservation, noop for None/empty, invalid str propagation, run_workflow step visibility, callable env values resolved with runner, mixed callable/static env, callable errors propagate) + TestWorkflowProgress class (final _progress matches total/completed, progress increments per step, single-step progress, initial progress persisted before first step, single direct handler has no _progress key) + TestCallableLogDir class (callable log_dir resolves with runner, static still works, callable errors propagate)
     - tests/core/test_logging.py — per-run file logging, App config (log_dir, worktree_dir, state_dir defaults)
     - tests/core/test_state_persistence.py — state file creation, naming format, content, per-step persistence, log/state filename correlation
     - tests/channels/test_cli_channel.py — CliChannel initial_state and attribute tests
@@ -890,10 +907,15 @@ key_design_decisions:
     (os.environ is process-global), acceptable for current single-threaded model.
     _app_env is private and not exported from __init__.py.
   - >
-    Automatic state persistence. Runner persists state as JSON to
-    <state_dir>/<timestamp>-<id>.json at key lifecycle points: before
-    workflow, after each run_workflow step, and after completion. State
-    and log files share the same <timestamp>-<id> base name for
-    correlation. App.state_dir configures the directory (default
-    ".antkeeper/state/"). This enables debugging and mid-workflow recovery
-    without handlers needing explicit persistence logic.
+    Automatic state persistence with progress tracking. Runner persists state
+    as JSON to <state_dir>/<timestamp>-<id>.json at key lifecycle points:
+    (1) before workflow — initial state, (2) run_workflow inserts
+    _progress: {total, completed: 0} and persists before the first step
+    so external observers can see total step count immediately, (3) after
+    each run_workflow step — state with incremented _progress.completed,
+    (4) after completion — final state. State and log files share the same
+    <timestamp>-<id> base name for correlation. App.state_dir configures
+    the directory (default ".antkeeper/state/"). Single direct handlers
+    (not using run_workflow) produce no _progress key. This enables
+    debugging and mid-workflow progress polling without handlers needing
+    explicit persistence logic.
