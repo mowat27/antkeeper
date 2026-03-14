@@ -69,7 +69,7 @@ def test_state_updates_uses_delegation_prompt(mock_rp, mock_ej, runner_factory):
     runner, channel = runner_factory()
     h(runner, {"prompt": "build it"})
     call_args = mock_rp.call_args[0][0]
-    assert "Use an agent to run the following command" in call_args
+    assert "run the following command using an agent" in call_args
     assert "spec_file" in call_args
     assert "slug" in call_args
 

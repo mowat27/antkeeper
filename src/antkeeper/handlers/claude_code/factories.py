@@ -29,17 +29,23 @@ def _delegation_prompt(command: str, *, required_fields: list[str]) -> str:
     """Build a prompt that delegates the command to a sub-agent and asks the outer agent to return JSON."""
     example = {field: f"<{field}>" for field in required_fields}
     return (
-        f"Use an agent to run the following command:\n"
+        f"Your ONLY job is to run the following command using an agent, "
+        f"then return its output as JSON. Do not read any files. "
+        f"Do not take any other actions. Do not implement anything. "
+        f"Do not attempt to fix errors or retry.\n"
+        f"\n"
+        f"Command:\n"
         f"\n"
         f"{command}\n"
         f"\n"
-        f"Wait for the agent to finish. Then, using the agent's output, "
+        f"Wait for the agent to finish. Then, using ONLY the agent's output, "
         f"return ONLY a JSON object with these fields — no other text, "
         f"no markdown fences, no explanation:\n"
         f"\n"
         f"{_json.dumps(example)}\n"
         f"\n"
-        f"Replace each placeholder with the actual value from the agent's output."
+        f"Replace each placeholder with the actual value from the agent's output. "
+        f"If the agent's output does not contain a value for a field, use null."
     )
 
 
