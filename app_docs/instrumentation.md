@@ -180,6 +180,35 @@ implement = cc_handler("/implement $spec_file")
 specify = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
 ```
 
+### Per-Handler Env Override
+
+Pass `env` to set environment variables for the duration of that handler's execution only. The dict merges with App-level env using `{**app_env, **handler_env}` semantics — handler values win for overlapping keys. Variables are restored after the handler completes, whether it succeeds or raises.
+
+```python
+# Set a specific effort level for one heavyweight handler
+implement_team = cc_handler(
+    "/implement-team $spec_file",
+    label="Implement spec_file using a team",
+    env={"CLAUDE_CODE_EFFORT_LEVEL": "high"},
+)
+
+# Combined with model override
+specify_slice = cc_handler(
+    "/design-importer specify-slice $prompt",
+    label="Specify design slice",
+    model='sonnet',
+    env={"CLAUDE_CODE_EFFORT_LEVEL": "medium"},
+    state_updates=["spec_file"],
+)
+
+# No env override — behaves exactly as before
+review = cc_handler("/review $spec_file", label="Review spec_file")
+```
+
+The `env` dict contains static `str` values only (no callables). Values are active for the entire handler execution, including both `run_prompt` calls in extraction mode. `env=None` (the default) is a no-op — fully backward compatible.
+
+The implementation wraps the handler body in `with _app_env(env):`, reusing the same context manager that handles App-level env. Handler-level env nests inside any App-level env that is already active.
+
 ### Model Override
 
 Pass `model` to pin a specific LLM model at factory time, overriding `state.get("model")`. When omitted, the handler falls back to the model from state.

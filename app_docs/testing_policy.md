@@ -362,7 +362,31 @@ assert "spec_file" in second_call[0][0]               # required fields listed
 
 **Step 1 failure skips Step 2** — use `side_effect=AgentExecutionError("boom")` (not a list) so `run_prompt` raises on the first call. Assert `mock_rp.assert_called_once()` to confirm Step 2 was never reached.
 
-Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), and error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response).
+**Handler-level env tests** — use `os.environ.get()` inside a `run_prompt` `side_effect` to capture environment variable values during execution. Use prefixed keys (`_ANTKEEPER_TEST_HF_*`) to avoid collisions with real environment variables. Each test cleans up any keys it sets:
+
+```python
+@patch("antkeeper.handlers.claude_code.factories.run_prompt")
+def test_env_sets_vars_during_handler_execution(mock_rp, runner_factory):
+    captured = {}
+
+    def capture_env(prompt, logger, **kwargs):
+        captured["val"] = os.environ.get("_ANTKEEPER_TEST_HF_KEY")
+        return "ok"
+
+    mock_rp.side_effect = capture_env
+    h = cc_handler("/cmd", env={"_ANTKEEPER_TEST_HF_KEY": "secret"})
+    runner, channel = runner_factory()
+    h(runner, {})
+    assert captured["val"] == "secret"
+```
+
+For tests that verify env restoration after failure, use `pytest.raises(WorkflowFailedError)` and assert the key is absent from `os.environ` after the block exits.
+
+For tests that verify pre-existing keys are restored (not deleted), set the key in `os.environ` directly, wrap the test body in `try/finally`, and pop the key in the `finally` block.
+
+Tests cover: env vars visible during execution, env restored after success, env restored after failure (WorkflowFailedError), pre-existing var overridden during execution and restored after, `env=None` is a no-op, env active during both extraction-mode `run_prompt` calls, and multiple env vars set and cleaned up together.
+
+Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), and handler-level env (set during execution, restored after success/failure, noop for None, active across both extraction calls).
 
 ### Helper Testing Patterns
 
