@@ -10,8 +10,10 @@ requested workflow through a CliChannel.
 """
 import argparse
 import importlib.util
+import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,6 +126,90 @@ def parse_state_pairs(pairs: list[str]) -> dict[str, str]:
     return state
 
 
+def fetch_gh_issue(issue_number: int) -> dict:
+    """Fetch a GitHub issue via the gh CLI.
+
+    Args:
+        issue_number: The GitHub issue number to fetch.
+
+    Returns:
+        dict: Parsed JSON response from gh containing issue details.
+
+    Raises:
+        FileNotFoundError: If gh CLI is not installed.
+        subprocess.CalledProcessError: If gh command fails.
+        json.JSONDecodeError: If gh response is not valid JSON.
+    """
+    result = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--json",
+            "number,title,body,comments,labels,state",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def build_issues_prompt(issues: list[dict]) -> str:
+    """Build a prompt from a list of GitHub issues.
+
+    Args:
+        issues: List of issue dictionaries from fetch_gh_issue.
+
+    Returns:
+        str: Formatted prompt containing all issues.
+    """
+    parts = ["Fix the following GitHub issue(s).\n"]
+    for issue in issues:
+        parts.append(f"--- Issue #{issue['number']} ---\n")
+        parts.append(json.dumps(issue, indent=2))
+        parts.append("\n\n")
+    return "".join(parts)
+
+
+def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict) -> None:
+    """Execute a workflow via CLI channel.
+
+    Loads the app, creates a CLI channel, runs the workflow, and handles errors.
+
+    Args:
+        agents_file: Path to Python file containing the app.
+        workflow_name: Name of the workflow to execute.
+        state: Initial state dictionary for the workflow.
+
+    Raises:
+        SystemExit: On file not found, missing app attribute, or workflow failure.
+    """
+    try:
+        app = load_app(agents_file)
+    except FileNotFoundError:
+        logger.error(f"Agents file not found: {agents_file}")
+        print(f"Error: agents file not found: {agents_file}", file=sys.stderr)
+        sys.exit(1)
+    except AttributeError:
+        logger.error(f"{agents_file} has no 'app' attribute")
+        print(f"Error: {agents_file} has no 'app' attribute", file=sys.stderr)
+        sys.exit(1)
+
+    logger.info(f"App loaded from {agents_file}")
+    channel = CliChannel(workflow_name=workflow_name, initial_state=state)
+    runner = Runner(app, channel)
+    logger.info(f"Runner created: run_id={runner.id}")
+    try:
+        result = runner.run()
+    except WorkflowFailedError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    logger.info("Workflow run complete")
+    print(result)
+
+
 def main() -> None:
     """Main entry point for the Antkeeper CLI.
 
@@ -176,6 +262,13 @@ def main() -> None:
     run_parser.add_argument("workflow_name")
     run_parser.add_argument("prompt_files", nargs="*")
 
+    fix_gh_issues_parser = subparsers.add_parser("fix-gh-issues")
+    fix_gh_issues_parser.add_argument("--agents-file", default="handlers.py")
+    fix_gh_issues_parser.add_argument("--initial-state", action="append", default=[])
+    fix_gh_issues_parser.add_argument("--model", default=None)
+    fix_gh_issues_parser.add_argument("workflow_name")
+    fix_gh_issues_parser.add_argument("issue_numbers", nargs="+", type=int)
+
     server_parser = subparsers.add_parser("server")
     server_parser.add_argument("--host", default="127.0.0.1")
     server_parser.add_argument("--port", type=int, default=8000)
@@ -194,19 +287,6 @@ def main() -> None:
     logger.debug(f"CLI args parsed: command={args.command}")
 
     if args.command == "run":
-        agents_file = args.agents_file
-        try:
-            app = load_app(agents_file)
-        except FileNotFoundError:
-            logger.error(f"Agents file not found: {agents_file}")
-            print(f"Error: agents file not found: {agents_file}", file=sys.stderr)
-            sys.exit(1)
-        except AttributeError:
-            logger.error(f"{agents_file} has no 'app' attribute")
-            print(f"Error: {agents_file} has no 'app' attribute", file=sys.stderr)
-            sys.exit(1)
-
-        logger.info(f"App loaded from {agents_file}")
         state = parse_state_pairs(args.initial_state)
         if args.prompt_files:
             parts = []
@@ -222,16 +302,29 @@ def main() -> None:
             state["prompt"] = sys.stdin.read()
         if args.model is not None:
             state["model"] = args.model
-        channel = CliChannel(workflow_name=args.workflow_name, initial_state=state)
-        runner = Runner(app, channel)
-        logger.info(f"Runner created: run_id={runner.id}")
+        _run_workflow_cli(args.agents_file, args.workflow_name, state)
+
+    elif args.command == "fix-gh-issues":
+        issues = []
         try:
-            result = runner.run()
-        except WorkflowFailedError as e:
-            print(str(e), file=sys.stderr)
+            for issue_number in args.issue_numbers:
+                issues.append(fetch_gh_issue(issue_number))
+        except FileNotFoundError:
+            print("`gh` CLI not found", file=sys.stderr)
             sys.exit(1)
-        logger.info("Workflow run complete")
-        print(result)
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to fetch issue: {e.stderr}", file=sys.stderr)
+            sys.exit(1)
+        except json.JSONDecodeError:
+            print("Unexpected response from `gh` CLI", file=sys.stderr)
+            sys.exit(1)
+
+        state = parse_state_pairs(args.initial_state)
+        state["prompt"] = build_issues_prompt(issues)
+        state["issue_numbers"] = args.issue_numbers
+        if args.model is not None:
+            state["model"] = args.model
+        _run_workflow_cli(args.agents_file, args.workflow_name, state)
 
     elif args.command == "init":
         path = os.path.realpath(args.path)

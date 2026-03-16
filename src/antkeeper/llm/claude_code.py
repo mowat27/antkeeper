@@ -87,7 +87,9 @@ class ClaudeCodeAgent:
         logger.info(f"LLM prompt submitted (length={len(prompt)} chars)")
         logger.debug(f"LLM prompt content: {prompt}")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+            )
         except FileNotFoundError:
             logger.error("claude binary not found")
             raise AgentExecutionError("claude binary not found")
@@ -119,7 +121,12 @@ class ClaudeCodeAgent:
         return response
 
 
-def run_prompt(prompt: str, logger: logging.Logger, model: str | None = None) -> str:
+def run_prompt(
+    prompt: str,
+    logger: logging.Logger,
+    model: str | None = None,
+    opts: list[str] | None = None,
+) -> str:
     """Execute a prompt via ClaudeCodeAgent and return the response.
 
     Convenience wrapper that creates an agent with yolo=True, sends the prompt,
@@ -129,10 +136,11 @@ def run_prompt(prompt: str, logger: logging.Logger, model: str | None = None) ->
         prompt: The prompt string to send.
         logger: Logger for caller-level context.
         model: Optional model identifier passed to the agent.
+        opts: Extra CLI arguments forwarded to ClaudeCodeAgent.
 
     Returns:
         The agent's response string.
     """
     logger.debug(f"run_prompt called (prompt length={len(prompt)} chars)")
-    agent = ClaudeCodeAgent(model=model, yolo=True)
+    agent = ClaudeCodeAgent(model=model, yolo=True, opts=opts)
     return agent.prompt(prompt)
