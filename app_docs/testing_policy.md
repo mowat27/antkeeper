@@ -95,8 +95,9 @@ tests/
 
 CLI tests are split into two categories:
 
-**Argument parsing tests** (`TestArgParsing`) - Test argparse behavior in isolation:
+**Argument parsing tests** (`TestArgParsing`, `TestFixGhIssuesArgParsing`) - Test argparse behavior in isolation:
 - Build a parser mirror in `_build_parser()` to avoid loading the full CLI machinery
+- The mirror must exactly match the production parser structure, including the shared parent parser pattern: create a `common = argparse.ArgumentParser(add_help=False)` with shared flags (`--agents-file`, `--initial-state`, `--model`, `workflow_name`) and pass it via `parents=[common]` to each subparser, just as `main()` does with `common_run_parent`
 - Test flag parsing, mutual exclusion, and invalid input handling
 - Use `pytest.raises(SystemExit)` for argparse error cases
 

@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-16 (feature-per-handler-env)
+# Last validated: 2026-03-16 (fix/fix-gh-issues-delegate-to-run)
 
 overview:
   name: antkeeper
@@ -572,6 +572,10 @@ cli_entry_point:
   shared_functions:
     - "load_app(path: str) -> App  # dynamically imports module, extracts app attr"
     - "parse_state_pairs(pairs: list[str]) -> dict[str, str]  # splits key=val strings"
+    - "fetch_gh_issue(issue_number: int) -> dict  # calls gh issue view --json, parses JSON"
+    - "build_issues_prompt(issues: list[dict]) -> str  # formats issues into a fix prompt"
+    - "_build_common_state(args) -> dict  # parses initial_state pairs + optional model into state dict"
+    - "_run_workflow_cli(agents_file, workflow_name, state) -> None  # loads app, creates CliChannel+Runner, runs, handles errors"
   subcommands:
     run:
       args:
@@ -602,6 +606,30 @@ cli_entry_point:
         - "FileNotFoundError -> prompt file not found (positional arg)"
         - "Invalid state pair (no '=') -> stderr + exit(1)"
         - "WorkflowFailedError -> stderr + exit(1)"
+
+    fix-gh-issues:
+      args:
+        - "--agents-file (default: handlers.py)"
+        - "--initial-state key=val (repeatable)"
+        - "--model — stored as state['model']"
+        - "workflow_name (positional)"
+        - "issue_numbers (positional, nargs='+', type=int) — one or more GitHub issue numbers"
+      flow: >
+        1. Calls fetch_gh_issue(n) for each issue number via gh CLI
+        2. Calls _build_common_state(args) for initial_state + model
+        3. Sets state['prompt'] = build_issues_prompt(issues)
+        4. Sets state['issue_numbers'] = args.issue_numbers (list of ints)
+        5. Delegates to _run_workflow_cli(agents_file, workflow_name, state)
+      error_handling:
+        - "gh not installed (FileNotFoundError) -> '`gh` CLI not found' + exit(1)"
+        - "gh command fails (CalledProcessError) -> 'Failed to fetch issue: ...' + exit(1)"
+        - "Invalid gh response (JSONDecodeError) -> 'Unexpected response from `gh` CLI' + exit(1)"
+        - "WorkflowFailedError -> stderr + exit(1)"
+      design_note: >
+        fetch_gh_issue uses --json number,title,body,comments,labels,state.
+        build_issues_prompt wraps each issue as '--- Issue #N ---\n<json>'.
+        Refactoring: run and fix-gh-issues share _build_common_state and
+        _run_workflow_cli helpers to reduce duplication.
 
     server:
       args:
@@ -834,7 +862,7 @@ testing_design:
     - tests/core/test_state_persistence.py — state file creation, naming format, content, per-step persistence, log/state filename correlation
     - tests/channels/test_cli_channel.py — CliChannel initial_state and attribute tests
     - tests/channels/test_api_channel.py — ApiChannel type, initial_state, stdout/stderr reporting
-    - tests/test_cli.py — CLI arg parsing, positional prompt files, stdin prompt, WorkflowFailedError handling, integration
+    - tests/test_cli.py — CLI arg parsing, positional prompt files, stdin prompt, WorkflowFailedError handling, integration; TestFetchGhIssue (gh subprocess, errors); TestBuildIssuesPrompt (single/multi issue format); TestFixGhIssuesArgParsing (issue_numbers nargs=+); TestFixGhIssuesIntegration (fetch+run, multi-issue, gh failure, model/initial-state merge)
     - tests/test_server.py — FastAPI webhook endpoint (returns run_id, 404 for unknown workflow, 422 for invalid body)
     - tests/channels/test_slack_channel.py — SlackChannel type, initial_state, report_progress/error posts, HTTP failure resilience
     - tests/test_slack_server.py — Slack event endpoint (url_verification, bot filter, mention, edit, reply, delete, timer dispatch, unknown workflow, dedup, env var validation)
