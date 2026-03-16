@@ -1,12 +1,12 @@
 # Antkeeper
 
-A lightweight Python workflow engine for agentic workflows that run AFK. Define workflow steps, wire them to I/O channels (CLI, API, Slack), and walk away.
+A lightweight Python workflow engine for agentic workflows that run AFK.
 
 ## Who This Is For
 
 Engineers building agentic workflows — LLM-driven pipelines that spec out features, write code, create branches, open PRs — that need to run reliably without supervision.
 
-Once you're running similar workflows across multiple projects, the duplication in wiring, error handling, and state management becomes the bottleneck. Antkeeper extracts that into a framework.
+Once you're running similar workflows across multiple projects, the duplication in wiring, error handling, and state management becomes unmanageable. Antkeeper extracts all of that into a framework so you can focus on the application-specifics of your agentic layer.
 
 ## The Problem
 
@@ -38,7 +38,7 @@ app = App()
 
 # Factory-built steps: run an LLM command and thread results through state
 specify    = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
-implement  = cc_handler("/sdlc:implement $spec_file")
+implement  = cc_handler("/implement $spec_file")
 document   = cc_handler("/document this branch.")
 
 @app.handler
@@ -59,7 +59,7 @@ def sdlc(runner: Runner, state: State) -> State:
 antkeeper run --model sonnet sdlc prompts/add-auth.md
 ```
 
-The same workflow runs from a Slack message, an HTTP webhook, or a CI job. The channel determines how input arrives and how progress is reported. Handlers work with state only.
+The same workflow runs from an HTTP webhook or a CI job. With a Slack app configured, it can also be triggered by a message. The channel determines how input arrives and how progress is reported. Handlers work with state only.
 
 ### Core Concepts
 
@@ -69,15 +69,15 @@ The same workflow runs from a Slack message, an HTTP webhook, or a CI job. The c
 
 **Runner** is the execution context for a single workflow run. It binds an `App` (handler registry) to a `Channel` (I/O boundary) and manages the run lifecycle: generating a unique run ID, setting up per-run file logging, persisting state, and resolving environment variables. Handlers use the runner to communicate back to the channel (`runner.report_progress()`, `runner.report_error()`) and to signal failure (`runner.fail()`). The runner is passed to every handler but handlers do not need to manage it — it is infrastructure.
 
-**Channels** are I/O adapters. They decouple workflow logic from how it is triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel reads @mentions in threads and replies in-thread. Handlers do not need to know which channel is active.
+**Channels** are I/O adapters. They decouple workflow logic from how it is triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel posts to threads (requires your own Slack app — see below). Handlers do not need to know which channel is active.
 
-**Agents** are the LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI, but the protocol is deliberately minimal — plug in Codex, a local model, or any other backend. The `cc_handler` factory is built on this protocol, but hand-written handlers can use it directly.
+**Agents** are the LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI, but the protocol is deliberately minimal — plug in Codex, a local model, or any other backend. The `cc_handler` factory is a convenience method built on this protocol, but hand-written handlers can use it directly.
 
 ### Built-in Integrations
 
 **Git** is available out of the box. `execute()` runs git commands, `current()` returns the branch name, `Worktree` and `git_worktree` manage isolated working directories. Git is ubiquitous in agentic workflows, so it ships as a utility. The same pattern could be extended for other common tools.
 
-**Slack** is a first-class channel. Start the server with bot credentials and workflows are triggered by @mentions, with progress and results posted as thread replies.
+**Slack** is supported as a channel. The framework includes a `SlackChannel` that posts workflow progress and results as thread replies, triggered by @mentions. However, using it requires a Slack app installed in your workspace. Antkeeper does not distribute a public Slack app — you would need to create your own. See [Slack Integration](app_docs/slack.md) for details.
 
 ### Two Ways to Write Handlers
 
@@ -90,7 +90,7 @@ def my_step(runner: Runner, state: State) -> State:
     return {**state, "result": "done"}
 ```
 
-The **handler factory** (`cc_handler`) eliminates boilerplate for LLM-backed steps. Most agentic workflow steps interpolate state into a prompt, call an LLM, and extract structured fields from the response:
+The **handler factory** (`cc_handler`) eliminates boilerplate for steps backed by Claude Code. Most agentic workflow steps interpolate state into a prompt, call an LLM, and extract structured fields from the response:
 
 ```python
 specify = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
@@ -124,7 +124,7 @@ antkeeper run --model sonnet specify prompts/describe.md
 # Run the full SDLC pipeline
 antkeeper run --model sonnet sdlc prompts/add-auth.md
 
-# Start an API/Slack server
+# Start the API server
 antkeeper server --host 0.0.0.0 --port 8000
 
 # Trigger via HTTP
@@ -133,7 +133,7 @@ curl -X POST http://localhost:8000/webhook \
   -d '{"workflow_name": "sdlc", "initial_state": {"prompt": "Add user authentication", "model": "sonnet"}}'
 ```
 
-For Slack integration, set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env` file and start the server.
+For Slack integration (requires your own Slack app), set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env` file and start the server. See [Slack Integration](app_docs/slack.md).
 
 ## Design Principles
 
