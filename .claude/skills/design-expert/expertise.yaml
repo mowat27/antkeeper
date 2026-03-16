@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-16 (cc-handler-two-step-extraction)
+# Last validated: 2026-03-16 (feature-per-handler-env)
 
 overview:
   name: antkeeper
@@ -466,7 +466,7 @@ helper_functions:
 handler_factories:
   cc_handler:
     file: src/antkeeper/handlers/claude_code/factories.py
-    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None) -> Handler"
+    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None, env: dict[str, str] | None = None) -> Handler"
     returns: "Handler Protocol — callable (Runner, State) -> State with __name__ attribute"
     responsibility: >
       Factory producing (Runner, State) -> State handler functions in two modes:
@@ -510,6 +510,13 @@ handler_factories:
         AgentExecutionError (LLM failure in either step), and ValueError (bad JSON).
         All route to runner.fail(f"{label} failed: {error}") -> WorkflowFailedError.
         Step 1 failure short-circuits before step 2 is called.
+      env_handling: >
+        When env is provided, the handler body (interpolation, both run_prompt calls, extraction)
+        executes inside _app_env(env). Handler-level env merges with App-level env via nesting:
+        Runner.run() sets App-level env first (via _app_env in runner.py), and the inner
+        _app_env(env) in the handler overwrites overlapping keys for handler-level env.
+        Handler env values are static str only — no callable support. env=None is a no-op.
+        _app_env imported from antkeeper.core.app into factories.py for reuse.
       progress: "Reports 'Running {label}' before and '{label} complete' after via runner.report_progress."
 
   handlers_package_exports:
@@ -838,7 +845,7 @@ testing_design:
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler: label derivation (default strips slash, first token, custom override), extraction mode (extracts only named fields, two-step run-then-extract pattern verified via mock call count + args, progress messages, single field, extraction always uses haiku even when handler has different model, step 1 failure skips step 2, step 2 failure causes WorkflowFailedError), fire-and-forget mode (returns state unchanged, empty list is fire-and-forget, progress messages), $var interpolation (substitution, multiple vars, no vars passthrough, non-string str() conversion, ${var} not interpolated), model override (factory model passed to run_prompt for step 1, factory beats state model, fallback to state when no override), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field)
+    - tests/handlers/test_factories.py — cc_handler: label derivation (default strips slash, first token, custom override), extraction mode (extracts only named fields, two-step run-then-extract pattern verified via mock call count + args, progress messages, single field, extraction always uses haiku even when handler has different model, step 1 failure skips step 2, step 2 failure causes WorkflowFailedError), fire-and-forget mode (returns state unchanged, empty list is fire-and-forget, progress messages), $var interpolation (substitution, multiple vars, no vars passthrough, non-string str() conversion, ${var} not interpolated), model override (factory model passed to run_prompt for step 1, factory beats state model, fallback to state when no override), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field), handler-level env (env vars set during execution, restored after success, restored after failure, existing var preserved and restored, env=None noop, active during both run_prompt calls in extraction mode, multiple vars)
 
 key_design_decisions:
   - >
@@ -877,7 +884,7 @@ key_design_decisions:
     Per-run file logging. Each Runner creates an isolated log file. No console
     logging from the framework. Module-level loggers provide debug tracing.
   - >
-    cc_handler factory with two-step extraction. src/antkeeper/handlers/claude_code/factories.py
+    cc_handler factory with two-step extraction and per-handler env. src/antkeeper/handlers/claude_code/factories.py
     provides cc_handler, a factory that eliminates boilerplate for handlers that run an LLM
     command and either return state unchanged (fire-and-forget) or extract named fields via a
     second LLM call (extraction mode). In extraction mode, step 1 sends the command to the
@@ -885,6 +892,9 @@ key_design_decisions:
     (_EXTRACTION_MODEL) to extract structured JSON — decoupling the work model from the
     extraction step. An optional model keyword argument pins the primary LLM model at factory
     time, overriding state['model']; the extraction step always uses "haiku" regardless.
+    An optional env dict sets handler-scoped environment variables for the entire handler
+    execution (both run_prompt calls). Handler-level env overrides App-level env for
+    overlapping keys via nested _app_env calls. env values are static str only (no callables).
     Handlers built by the factory have __name__ set to their label for use with
     app.add_handler(). The claude_code __init__.py re-exports cc_handler only —
     there is no pre-built App or pre-registered handlers.

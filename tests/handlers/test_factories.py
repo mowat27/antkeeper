@@ -11,8 +11,10 @@ Covers:
     - Error handling: AgentExecutionError, bad JSON, missing state keys, and
       missing JSON fields all cause runner.fail() / WorkflowFailedError.
     - Edge cases: no placeholders, multiple placeholders, empty list, ${var} literal.
+    - Handler-level env: per-handler environment variable overrides.
 """
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -290,3 +292,110 @@ def test_missing_field_in_json_response_calls_runner_fail(mock_rp, mock_ej, runn
     runner, channel = runner_factory()
     with pytest.raises(WorkflowFailedError):
         h(runner, {})
+
+
+# ---------------------------------------------------------------------------
+# Handler-level env
+# ---------------------------------------------------------------------------
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt")
+def test_env_sets_vars_during_handler_execution(mock_rp, runner_factory):
+    """Handler env vars are visible in os.environ during execution."""
+    captured = {}
+
+    def capture_env(prompt, logger, **kwargs):
+        captured["val"] = os.environ.get("_ANTKEEPER_TEST_HF_KEY")
+        return "ok"
+
+    mock_rp.side_effect = capture_env
+    h = cc_handler("/cmd", env={"_ANTKEEPER_TEST_HF_KEY": "secret"})
+    runner, channel = runner_factory()
+    h(runner, {})
+    assert captured["val"] == "secret"
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
+def test_env_restored_after_handler(mock_rp, runner_factory):
+    """Handler env vars are removed from os.environ after execution."""
+    assert "_ANTKEEPER_TEST_HF_RESTORE" not in os.environ
+    h = cc_handler("/cmd", env={"_ANTKEEPER_TEST_HF_RESTORE": "val"})
+    runner, channel = runner_factory()
+    h(runner, {})
+    assert "_ANTKEEPER_TEST_HF_RESTORE" not in os.environ
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=AgentExecutionError("boom"))
+def test_env_restored_after_handler_failure(mock_rp, runner_factory):
+    """Handler env vars are cleaned up even when the handler fails."""
+    h = cc_handler("/cmd", env={"_ANTKEEPER_TEST_HF_FAIL": "val"})
+    runner, channel = runner_factory()
+    with pytest.raises(WorkflowFailedError):
+        h(runner, {})
+    assert "_ANTKEEPER_TEST_HF_FAIL" not in os.environ
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt")
+def test_env_preserves_existing_var(mock_rp, runner_factory):
+    """Handler env overrides existing var during execution, restores original after."""
+    captured = {}
+    os.environ["_ANTKEEPER_TEST_HF_ORIG"] = "original"
+    try:
+
+        def capture_env(prompt, logger, **kwargs):
+            captured["val"] = os.environ.get("_ANTKEEPER_TEST_HF_ORIG")
+            return "ok"
+
+        mock_rp.side_effect = capture_env
+        h = cc_handler("/cmd", env={"_ANTKEEPER_TEST_HF_ORIG": "override"})
+        runner, channel = runner_factory()
+        h(runner, {})
+        assert captured["val"] == "override"
+        assert os.environ["_ANTKEEPER_TEST_HF_ORIG"] == "original"
+    finally:
+        os.environ.pop("_ANTKEEPER_TEST_HF_ORIG", None)
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
+def test_env_none_is_noop(mock_rp, runner_factory):
+    """env=None is a no-op — handler works identically to no env argument."""
+    h = cc_handler("/cmd", env=None)
+    runner, channel = runner_factory()
+    result = h(runner, {"x": 1})
+    assert result == {"x": 1}
+
+
+@patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"x": "v"})
+@patch("antkeeper.handlers.claude_code.factories.run_prompt")
+def test_env_active_during_extraction_step(mock_rp, mock_ej, runner_factory):
+    """Handler env vars are visible during both run_prompt calls (primary + extraction)."""
+    captured = []
+
+    def capture_env(prompt, logger, **kwargs):
+        captured.append(os.environ.get("_ANTKEEPER_TEST_HF_EXT"))
+        return "ok"
+
+    mock_rp.side_effect = capture_env
+    h = cc_handler("/cmd", state_updates=["x"], env={"_ANTKEEPER_TEST_HF_EXT": "val"})
+    runner, channel = runner_factory()
+    h(runner, {})
+    assert captured == ["val", "val"]
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt")
+def test_env_with_multiple_vars(mock_rp, runner_factory):
+    """Multiple env vars are all set during execution and all removed after."""
+    captured = {}
+
+    def capture_env(prompt, logger, **kwargs):
+        captured["a"] = os.environ.get("_ANTKEEPER_TEST_HF_A")
+        captured["b"] = os.environ.get("_ANTKEEPER_TEST_HF_B")
+        return "ok"
+
+    mock_rp.side_effect = capture_env
+    h = cc_handler("/cmd", env={"_ANTKEEPER_TEST_HF_A": "1", "_ANTKEEPER_TEST_HF_B": "2"})
+    runner, channel = runner_factory()
+    h(runner, {})
+    assert captured == {"a": "1", "b": "2"}
+    assert "_ANTKEEPER_TEST_HF_A" not in os.environ
+    assert "_ANTKEEPER_TEST_HF_B" not in os.environ

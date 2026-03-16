@@ -13,12 +13,17 @@ The ``cc_handler`` factory eliminates boilerplate by producing
 An optional ``model`` argument allows overriding the LLM model on a
 per-handler basis.  When omitted, the model is read from ``state["model"]``
 at call time (i.e. the workflow-level default).
+
+An optional ``env`` dict sets environment variables for the handler's
+execution only.  Handler-level env merges with App-level env using
+``{**app_env, **handler_env}`` semantics (handler values win).
 """
 
 import json as _json
 import re
 from typing import Protocol
 
+from antkeeper.core.app import _app_env
 from antkeeper.core.runner import Runner
 from antkeeper.core.domain import State
 from antkeeper.helpers.json import extract_json
@@ -55,7 +60,15 @@ def _extraction_prompt(response: str, *, required_fields: list[str]) -> str:
 
 
 class Handler(Protocol):
-    """A handler callable with a ``__name__`` attribute."""
+    """A handler callable with a ``__name__`` attribute.
+
+    Attributes:
+        __name__: Human-readable label used in progress messages and logging.
+
+    Methods:
+        __call__: Run the handler against the given runner and state, returning
+            updated state.
+    """
 
     __name__: str
 
@@ -68,6 +81,7 @@ def cc_handler(
     state_updates: list[str] | None = None,
     label: str | None = None,
     model: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> Handler:
     """Build a handler that runs a Claude Code command and updates state.
 
@@ -80,6 +94,9 @@ def cc_handler(
             token of *command* with any leading ``/`` stripped.
         model: LLM model identifier. When provided, overrides the model from
             state. Defaults to ``state.get("model")``.
+        env: Environment variables to set for this handler's execution only.
+            Merges with App-level env (handler values win).  Restored after
+            the handler completes, even on failure.
 
     Returns:
         A handler function with signature ``(Runner, State) -> State``.
@@ -116,27 +133,28 @@ def cc_handler(
                 LLM execution, JSON parsing, or field extraction fails.
         """
         runner.report_progress(f"Running {label}")
-        try:
-            prompt = re.sub(
-                r'\$([a-zA-Z_]\w*)',
-                lambda m: str(state[m.group(1)]),
-                command,
-            )
-            effective_model = model if model is not None else state.get("model")
-            response = run_prompt(prompt, runner.logger, model=effective_model)
-            if state_updates:
-                extraction_response = run_prompt(
-                    _extraction_prompt(response, required_fields=state_updates),
-                    runner.logger,
-                    model=_EXTRACTION_MODEL,
-                    opts=["--max-turns", "1"],
+        with _app_env(env):
+            try:
+                prompt = re.sub(
+                    r'\$([a-zA-Z_]\w*)',
+                    lambda m: str(state[m.group(1)]),
+                    command,
                 )
-                parsed = extract_json(extraction_response)
-                result = {k: parsed[k] for k in state_updates}
-            else:
-                result = {}
-        except (KeyError, AgentExecutionError, ValueError) as error:
-            runner.fail(f"{label} failed: {error}")
+                effective_model = model if model is not None else state.get("model")
+                response = run_prompt(prompt, runner.logger, model=effective_model)
+                if state_updates:
+                    extraction_response = run_prompt(
+                        _extraction_prompt(response, required_fields=state_updates),
+                        runner.logger,
+                        model=_EXTRACTION_MODEL,
+                        opts=["--max-turns", "1"],
+                    )
+                    parsed = extract_json(extraction_response)
+                    result = {k: parsed[k] for k in state_updates}
+                else:
+                    result = {}
+            except (KeyError, AgentExecutionError, ValueError) as error:
+                runner.fail(f"{label} failed: {error}")
         runner.report_progress(f"{label} complete")
         return {**state, **result}
 
