@@ -1,332 +1,181 @@
 # Antkeeper
 
-A lightweight Python workflow engine. Define handlers (workflow steps) via a decorator-based `App`, wire them to a `Channel` (I/O boundary), and execute through a `Runner`. Designed for composable, testable pipelines.
+A lightweight Python workflow engine inspired by frameworks like Flask. Define workflow steps, wire them to I/O channels (CLI, API, Slack), and let the framework handle the plumbing.
 
-## Installation
+## Who This Is For
 
-### From PyPI
+If you're building multi-step workflows — especially ones involving LLM agents, git operations, or deployment pipelines — and you want a clean way to compose, observe, and trigger them from different surfaces, Antkeeper was built for this.
 
-```bash
-# Install antkeeper (includes FastAPI, uvicorn, python-dotenv, httpx)
-pip install antkeeper
-```
+If you have a single script that runs once and you're happy with it, you probably don't need this.
 
-### From Source
+## The Problem
 
-```bash
-# Clone the repository
-git clone https://github.com/mowat27/antkeeper.git
-cd antkeeper
+As you automate more with AI agents, you accumulate scripts that chain LLM calls, git commands, and other steps together. These scripts tend to:
 
-# Install with uv
-uv sync  # Development dependencies
-uv pip install .  # Core package
-```
+- **Lose state** — if a step fails halfway through, you start from scratch
+- **Duplicate wiring** — every script re-implements argument parsing, error handling, and progress reporting
+- **Lock you into one surface** — a CLI script can't easily become a Slack bot or an API endpoint
+- **Hide what's happening** — no logging, no observability, no way to track progress
 
-## Requirements
+You end up with a collection of bespoke scripts that each solve the same infrastructure problems slightly differently.
 
-- Python >= 3.12
-- [uv](https://docs.astral.sh/uv/) package manager (for development)
+## How It Works
 
-## Quickstart
+Antkeeper borrows an idea from web frameworks like Flask: use decorators to register entry points, and let the framework handle the wiring.
 
-```bash
-# Create a new project with starter handlers
-antkeeper init my-project
-cd my-project
-
-# Run the healthcheck workflow
-antkeeper run healthcheck
-
-# Or manually install dependencies and create handlers
-uv sync
-
-# Run a workflow via CLI
-antkeeper run --agents-file handlers.py --initial-state result=5 plus_1
-
-# Run an LLM workflow with prompt from file
-antkeeper run --model sonnet specify prompts/describe.md
-
-# Run with multiple prompt files (concatenated in order)
-antkeeper run --model sonnet specify file1.md file2.md
-
-# Run with prompt from stdin
-echo "describe this project" | antkeeper run --model sonnet specify
-
-# Start an API server to trigger workflows via HTTP
-antkeeper server --host 0.0.0.0 --port 8000 --agents-file handlers.py
-
-# For Slack integration, create a .env file with:
-#   SLACK_BOT_TOKEN=xoxb-...
-#   SLACK_BOT_USER_ID=U...
-#   SLACK_COOLDOWN_SECONDS=5  (optional, default 5)
-#   ANTKEEPER_HANDLERS_FILE=handlers.py  (optional)
-
-# Use just recipes for common workflows
-just sdlc "Add authentication" opus           # Standard SDLC workflow
-just sdlc_iso "Add dark mode" opus           # Isolated SDLC in git worktree
-```
-
-## Project Structure
-
-```
-src/antkeeper/
-├── core/               # Framework kernel
-│   ├── domain.py       # State type alias, Channel protocol, WorkflowFailedError
-│   ├── app.py          # App handler registry, run_workflow helper
-│   └── runner.py       # Runner execution engine
-├── channels/
-│   ├── cli.py          # CLI channel adapter (stdout/stderr reporting)
-│   ├── api.py          # API channel adapter (server logging)
-│   └── slack.py        # Slack channel adapter (thread replies)
-├── git/                # Git integration
-│   ├── core.py         # Low-level command execution (execute, GitCommandError)
-│   ├── branch.py       # Branch operations (current)
-│   └── worktrees.py    # Worktree class, git_worktree context manager
-├── handlers/           # Pre-built handler collections
-│   └── claude_code/    # SDLC handlers using Claude Code as the LLM backend
-│       ├── __init__.py # 11 registered handlers + module-level app instance
-│       └── factories.py # cc_handler factory for building handlers without boilerplate
-├── helpers/
-│   ├── json.py         # JSON extraction utilities
-│   └── timestamps.py   # make_timestamp() and make_log_dir() utilities
-├── llm/                # LLM agent abstraction layer
-│   ├── __init__.py     # Agent protocol
-│   ├── errors.py       # AgentExecutionError
-│   └── claude_code.py  # ClaudeCodeAgent (subprocess-based)
-├── http/               # HTTP server layer
-│   ├── __init__.py     # FastAPI app factory
-│   ├── webhook.py      # POST /webhook endpoint
-│   └── slack_events.py # POST /slack_event endpoint
-├── cli.py              # Argparse-based CLI entry point
-└── server.py           # Server orchestrator (delegates to http/)
-```
-
-### Key Concepts
-
-- **State** (`dict[str, Any]`) — All workflow data flows as a flat dictionary. Handlers receive and return `State`; the `Runner` injects `run_id` and `workflow_name`. State is automatically persisted as JSON on every change.
-- **Channel** (Protocol) — I/O boundary adapter. Owns how progress/errors are reported and what initial state is supplied. This is the primary extension point for new I/O adapters.
-- **App** — Handler registry. Use the `@app.handler` decorator to register workflow steps by function name. Configure log, worktree, and state directories via `App(log_dir="...", worktree_dir="...", state_dir="...")`. `log_dir` may be a callable `(runner) -> str` for per-handler dynamic paths. Optionally supply `env={"KEY": value}` to inject environment variables for every handler run (values are converted to `str()`). `env` values may also be callables `(runner) -> Any` evaluated per handler invocation.
-- **Runner** — Execution engine. Binds an `App` + `Channel`, generates a `run_id`, and drives the workflow lifecycle. Persists state to `{timestamp}-{run_id}.json` in `app.state_dir`.
-- **run_workflow** — Composition helper. Folds state through a list of handler callables, enabling composite workflows without inheritance or a DAG scheduler.
-- **Agent** (Protocol) — LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. Extension point for new LLM backends.
-- **ClaudeCodeAgent** — Concrete `Agent` implementation. Delegates prompts to the `claude` CLI via subprocess. Accepts optional `model`, `yolo` (skip permissions), and `opts` (arbitrary CLI args) parameters.
-- **execute** — Low-level git command execution. Takes a command list (e.g., `["git", "status"]`), returns stripped stdout, raises `GitCommandError` on failure. Logs commands at debug level.
-- **current** — Returns current branch name (or "HEAD" if detached). Delegates to `execute(["git", "rev-parse", "--abbrev-ref", "HEAD"])`.
-- **GitCommandError** — Exception raised when git commands fail with non-zero exit codes. Contains stderr as message.
-- **Worktree** — Git worktree wrapper. Provides `create()`, `remove()`, and `exists` for managing isolated git working directories. Paths are absolute for safety after cwd changes.
-- **git_worktree** — Context manager that enters a worktree, guarantees cwd restoration via try/finally, and optionally creates/removes the worktree.
-- **SlackChannel** — Channel implementation that posts workflow progress and results to Slack threads via the Slack API.
-
-### Data Flow
-
-**CLI Execution:**
-1. CLI parses args and loads an agents file (Python module exporting `app`)
-2. Builds a `CliChannel(workflow_name, initial_state)`
-3. `Runner(app, channel).run()` merges initial state with `{run_id, workflow_name}`
-4. Handler receives `(runner, state)` and returns new `State`
-5. Composite handlers use `run_workflow` to chain sub-steps
-6. For LLM workflows: handler creates an `Agent`, calls `agent.prompt()`, and spreads the response into state
-7. Result state is printed to stdout
-8. If handler calls `runner.fail()`, CLI catches `WorkflowFailedError`, prints to stderr, exits 1
-
-**API Execution:**
-1. POST `/webhook` with `{"workflow_name": "my_wf", "initial_state": {...}}`
-2. Server validates workflow exists, creates `ApiChannel(workflow_name, initial_state)`
-3. Returns `{"run_id": "abc123"}` immediately
-4. Workflow runs in background task
-5. Progress/errors appear in server logs (stdout/stderr)
-6. If handler calls `runner.fail()`, server catches `WorkflowFailedError`, logs error, continues serving
-
-**Slack Execution:**
-1. User @mentions the bot in a Slack thread
-2. POST `/slack_event` receives the event, debounces rapid mentions (cooldown via `SLACK_COOLDOWN_SECONDS`)
-3. Server dispatches the workflow using `SlackChannel` bound to the originating thread
-4. Workflow progress and results are posted as thread replies
-5. Errors are reported back to the Slack thread
-
-### Writing Handlers
-
-Create a Python file with an `App` instance and decorated handlers:
+In Flask, you write a function and decorate it to bind it to a URL:
 
 ```python
-from antkeeper.core.app import App, run_workflow
-from antkeeper.core.runner import Runner
-from antkeeper.core.domain import State
-from antkeeper import make_timestamp, make_log_dir
-
-app = App()  # Defaults: log_dir="agents/logs/", worktree_dir="trees/", state_dir=".antkeeper/state/"
-# Or configure: App(log_dir="my/logs/", worktree_dir="worktrees/", state_dir=".antkeeper/state/")
-# Inject env vars for every handler: App(env={"API_KEY": "sk-123", "TIMEOUT": 30})
-#   - Values are converted to str() before setting on os.environ
-#   - Original values are restored after each handler completes (success or failure)
-#   - Keys absent from os.environ before are removed after handler completes (not set to "None")
-#   - Values may be callables: App(env={"RUN_ID": lambda runner: runner.id})
-#     The callable receives the runner and is evaluated per handler invocation
-# log_dir may also be a callable: App(log_dir=lambda runner: f"logs/{runner.workflow_name}/{runner.id}")
-#   - Evaluated once per handler invocation, before the log file is created
-# Use make_log_dir() for the standard timestamped per-run pattern:
-#   App(log_dir=make_log_dir("agents/logs"))  → "agents/logs/20260314120000-a1b2c3d4/"
-
-@app.handler
-def my_step(runner: Runner, state: State) -> State:
-    runner.report_progress("doing work")
-    runner.logger.info("Custom log entry")  # per-run log file
-    return {**state, "result": "done"}
+@app.route("/hello")
+def hello():
+    return "Hello, World!"
 ```
 
-Handlers always return a **new** dict (spread pattern) — never mutate incoming state.
-
-Handlers can delegate to LLM agents:
+In Antkeeper, you write a function and decorate it to register it as a workflow step:
 
 ```python
-from antkeeper.llm.claude_code import ClaudeCodeAgent
-
-@app.handler
-def ask_llm(runner: Runner, state: State) -> State:
-    agent = ClaudeCodeAgent(
-        model=state.get("model"),
-        yolo=state.get("skip_permissions", False),
-        opts=state.get("claude_opts")
-    )
-    response = agent.prompt(state["prompt"])
-    return {**state, "result": response}
-```
-
-Handlers can compose steps using `run_workflow`, which folds state through a list of functions sequentially. Each step receives the state returned by the previous step, so steps communicate by adding keys to the state dict:
-
-```python
-from antkeeper.core.app import App, run_workflow
+from antkeeper.core.app import App
 from antkeeper.core.runner import Runner
 from antkeeper.core.domain import State
 
 app = App()
 
 @app.handler
-def fetch_data(runner: Runner, state: State) -> State:
-    runner.report_progress("fetching data")
+def greet(runner: Runner, state: State) -> State:
+    runner.report_progress("saying hello")
+    return {**state, "message": "Hello, World!"}
+```
+
+Then run it:
+
+```bash
+antkeeper run greet
+```
+
+That one handler can be triggered from the CLI, an HTTP endpoint, or a Slack message — the channel handles how input arrives and how output is reported. The handler just works with state.
+
+### Three Core Concepts
+
+**State** is a plain Python dictionary that flows through your workflow. Each step receives the current state, does its work, and returns a new state dict. State is automatically persisted as JSON after every step, so if something fails mid-workflow, the progress so far is preserved.
+
+**Handlers** are the steps in your workflow. They're functions with the signature `(Runner, State) -> State`. Register them with `@app.handler` and they become callable by name from any channel.
+
+**Channels** are I/O adapters. They determine where input comes from and where output goes. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP requests. The Slack channel reads thread messages and replies in-thread. Your handlers don't need to know which channel is active.
+
+### Composing Workflows
+
+Individual handlers can be composed into multi-step workflows using `run_workflow`:
+
+```python
+from antkeeper.core.app import App, run_workflow
+
+app = App()
+
+@app.handler
+def fetch_data(runner, state):
     return {**state, "raw_data": [1, 2, 3]}
 
 @app.handler
-def transform(runner: Runner, state: State) -> State:
+def transform(runner, state):
     doubled = [x * 2 for x in state["raw_data"]]
     return {**state, "transformed": doubled}
 
 @app.handler
-def summarise(runner: Runner, state: State) -> State:
-    total = sum(state["transformed"])
-    return {**state, "summary": f"total={total}"}
-
-@app.handler
-def pipeline(runner: Runner, state: State) -> State:
-    return run_workflow(runner, state, [fetch_data, transform, summarise])
+def pipeline(runner, state):
+    return run_workflow(runner, state, [fetch_data, transform])
 ```
 
-`fetch_data` writes `raw_data`, `transform` reads it and writes `transformed`, and `summarise` reads that. State is persisted after each step, so a failure mid-pipeline preserves the progress so far.
+State threads through each step — `fetch_data` writes `raw_data`, `transform` reads it. Each step can also be run individually from the CLI.
 
-Registering the individual steps with `@app.handler` is optional, but doing so allows them to be run individually from the CLI using `--initial-state` to supply the keys they expect:
+### The Handler Factory
 
-```bash
-antkeeper run --agents-file handlers.py --initial-state raw_data='[1, 2, 3]' transform
-```
-
-Handlers can use git utilities:
+For LLM-backed workflows, writing full handler functions for every step creates a lot of repetition. The `cc_handler` factory builds handlers declaratively:
 
 ```python
-from antkeeper.git import execute, current, GitCommandError, Worktree, git_worktree
-from antkeeper import make_timestamp
+from antkeeper.handlers.claude_code import cc_handler
 
-@app.handler
-def git_operations(runner: Runner, state: State) -> State:
-    # Get current branch
-    branch = current()
-
-    # Execute arbitrary git commands
-    status = execute(["git", "status", "--short"])
-
-    # Handle git errors
-    try:
-        execute(["git", "checkout", "nonexistent"])
-    except GitCommandError as e:
-        runner.report_error(f"Git failed: {e}")
-
-    return {**state, "branch": branch, "status": status}
-
-@app.handler
-def isolated_workflow(runner: Runner, state: State) -> State:
-    worktree_name = f"{make_timestamp()}-{runner.id}"
-    wt = Worktree(base_dir=runner.app.worktree_dir, name=worktree_name)
-
-    with git_worktree(wt, create=True, branch="feat/new", remove=False):
-        # Execute steps inside worktree - cwd is wt.path
-        state = run_workflow(runner, state, [step1, step2])
-
-    # Cwd restored, worktree kept for review
-    return {**state, "worktree_path": wt.path}
+specify    = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
+implement  = cc_handler("/sdlc:implement $spec_file")
+document   = cc_handler("/document this branch.")
 ```
 
-### Logging and State Persistence
-
-The framework creates a log file and state file for each workflow run:
-
-- **Log file**: `{log_dir}/{timestamp}-{run_id}.log` (default: `agents/logs/`)
-- **State file**: `{state_dir}/{timestamp}-{run_id}.json` (default: `.antkeeper/state/`)
-
-Configure via `App(log_dir="path/", state_dir="path/")`. `log_dir` may be a callable `(runner) -> str` for per-handler dynamic directories (e.g. `lambda runner: f"logs/{runner.workflow_name}/{runner.id}"`, or use `make_log_dir("agents/logs")` for the standard timestamped per-run pattern). File naming ensures correlation between logs and state.
-
-Logs capture framework lifecycle events (runner init, workflow start/complete), handler execution (step names, state keys at DEBUG level), and errors. State is persisted as JSON after initial creation, before the first `run_workflow()` step (with `_progress` initialized to `{"total": N, "completed": 0}`), after each `run_workflow()` step, and after final handler return.
-
-Access the logger in handlers via `runner.logger`:
+Each line creates a handler that runs a command (with `$var` placeholders interpolated from state), optionally extracts structured fields from the response, and merges them back into state. This is how the built-in SDLC workflow is defined — the full pipeline is just:
 
 ```python
 @app.handler
-def my_step(runner: Runner, state: State) -> State:
-    runner.logger.info("Starting work")
-    runner.logger.debug(f"State: {state}")
-    return {**state, "done": True}
+def sdlc(runner, state):
+    return run_workflow(runner, state, [specify, branch, implement, document])
 ```
 
-Log format: `YYYY-MM-DD HH:MM:SS,mmm [LEVEL] antkeeper.run.{run_id} - message`
+You can mix factory-built and hand-written handlers freely. The factory handles the common case; hand-written handlers handle everything else.
 
-Logs do not appear in stdout/stderr (propagation disabled).
+## Installation
 
-### CLI Commands
+### From PyPI
 
-**antkeeper init** - Scaffold a new project:
-- `antkeeper init [path]` - Create a handlers.py file with starter workflows and examples (defaults to current directory)
-- Generates a working `healthcheck` handler, commented examples for workflow composition and worktree isolation
-- Prints guidance for environment variables (server and Slack integration)
-
-**antkeeper run** - Execute a workflow via CLI:
-- `--agents-file <path>` - Python file exporting `app` (default: `handlers.py`)
-- `--model <name>` - Model name to inject as `state["model"]` (e.g., `opus`, `sonnet`)
-- `--initial-state key=value` - Set additional state keys (repeatable)
-- Positional file args after `workflow_name` are read and concatenated into `state["prompt"]`
-- If no files provided and stdin is piped, stdin is read as the prompt
-
-**antkeeper server** - Start FastAPI webhook server:
-- `--host <host>` - Bind address (default: `127.0.0.1`)
-- `--port <port>` - Port number (default: `8000`)
-- `--reload` - Enable auto-reload on code changes
-- `--agents-file <path>` - Python file exporting `app` (default: `handlers.py`)
-- For Slack integration, set env vars `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` (via `.env` or environment)
-
-**API Usage:**
 ```bash
+pip install antkeeper
+```
+
+### From Source
+
+```bash
+git clone https://github.com/mowat27/antkeeper.git
+cd antkeeper
+uv sync
+```
+
+## Quickstart
+
+```bash
+# Scaffold a new project with starter handlers
+antkeeper init my-project
+cd my-project
+
+# Run the healthcheck workflow
+antkeeper run healthcheck
+
+# Run a workflow with initial state
+antkeeper run --initial-state result=5 plus_1
+
+# Run an LLM workflow with a prompt file
+antkeeper run --model sonnet specify prompts/describe.md
+
+# Start an API server
+antkeeper server --host 0.0.0.0 --port 8000
+
+# Trigger via HTTP
 curl -X POST http://localhost:8000/webhook \
   -H "Content-Type: application/json" \
   -d '{"workflow_name": "healthcheck"}'
-# Returns: {"run_id": "abc123"}
 ```
 
-The justfile provides convenient recipes:
-- `just sdlc "prompt" opus` - Run standard SDLC workflow, auto-detects if prompt is a file path
-- `just sdlc_iso "prompt" opus` - Run isolated SDLC workflow in a git worktree
-- `just server` - Start the API/Slack server
+For Slack integration, set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env` file and start the server. The bot responds to @mentions in threads.
+
+## Design Principles
+
+- **State is a plain dict** — no special types, no ORM. Every handler receives and returns `dict[str, Any]`.
+- **Handlers are pure functions** — input state in, output state out. No mutation, no side-channel communication.
+- **Channels separate I/O from logic** — handlers don't know whether they're running from a terminal, an API call, or a Slack message.
+- **Composition over inheritance** — `run_workflow` folds state through a list of steps. No DAG scheduler, no base classes.
+- **Slack is a first-class citizen** — not an afterthought or a plugin. It's a channel like CLI and API.
+- **Convention over configuration** — sensible defaults for log directories, state persistence, and worktree paths. Override when you need to.
+
+## Requirements
+
+- Python >= 3.12
+- [uv](https://docs.astral.sh/uv/) package manager (for development)
+
+## Further Reading
+
+- **[Reference Guide](app_docs/reference.md)** — Detailed coverage of handlers, channels, LLM integration, git utilities, state persistence, logging, and CLI commands
+- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence
+- **[HTTP Server](app_docs/http_server.md)** — Server architecture and endpoint design
+- **[Slack Integration](app_docs/slack.md)** — Bot configuration, event handling, thread-based replies
+- **[Testing Policy](app_docs/testing_policy.md)** — Test structure, fixtures, patterns
+- **[Releasing](app_docs/releasing.md)** — Packaging, dependencies, PyPI release process
 
 ## Development
-
-### Quality Checks
 
 ```bash
 # Run all checks (default just target)
@@ -337,45 +186,3 @@ just ruff    # Lint
 just ty      # Type-check
 just test    # Tests
 ```
-
-### Testing
-
-```bash
-uv run -m pytest tests/ -v
-```
-
-Tests are organized to mirror the source layout (`tests/core/`, `tests/channels/`, `tests/handlers/`, `tests/helpers/`, `tests/llm/`, `tests/git/`). Each test owns its setup using shared fixtures from `tests/conftest.py`. The `app` fixture provides log, worktree, and state isolation via temp directories. Git-specific tests use the `git_repo` fixture from `tests/git/conftest.py`. Helper tests (`tests/helpers/`) are pure unit tests with no Runner or fixtures — they patch `datetime` at the module level for deterministic timestamp assertions.
-
-### Navigating the Codebase
-
-Start with the **core layer** (`src/antkeeper/core/`):
-- `domain.py` defines `State` and the `Channel` protocol — the two types everything else depends on
-- `app.py` has the `App` registry and `run_workflow` composition helper
-- `runner.py` ties `App` + `Channel` together and drives execution
-
-The **channels layer** (`src/antkeeper/channels/`) has I/O adapters. `CliChannel` writes to stdout/stderr for terminal usage. `ApiChannel` writes to stdout/stderr for server logs. `SlackChannel` posts progress and results to Slack threads. Add new channels here for other I/O patterns.
-
-The **http layer** (`src/antkeeper/http/`) contains HTTP endpoint logic:
-- `__init__.py` exports `run_workflow_background()` (shared background task execution)
-- `webhook.py` exports `handle_webhook()` (POST `/webhook` implementation)
-- `slack_events.py` exports `SlackEventProcessor` class (POST `/slack_event` implementation with debounce state)
-- `server.py` in the root defines routes with `@api.post()` decorators and delegates to these modules
-
-The **handlers layer** (`src/antkeeper/handlers/`) contains pre-built handler collections. `handlers/claude_code/` provides 11 SDLC handlers using Claude Code as the LLM backend, exportable as a module-level `app` instance. `factories.py` inside that package exports `cc_handler`, a factory for building `(Runner, State) -> State` handlers in fire-and-forget mode (single LLM call, state unchanged) or extraction mode (two sequential `run_prompt` calls — raw prompt to the configured model, then extraction prompt to haiku — to parse structured fields into state) without boilerplate. The factory accepts optional `model` and `env` parameters: `model` pins a specific LLM model per handler; `env` sets per-handler environment variable overrides that merge with App-level env (handler values win) and are restored after handler completion.
-
-The **llm layer** (`src/antkeeper/llm/`) abstracts LLM interactions behind the `Agent` protocol. `ClaudeCodeAgent` is the concrete implementation. Add new LLM backends by implementing `prompt(str) -> str`.
-
-The **git layer** (`src/antkeeper/git/`) provides git integration for workflows. `core.py` exports `execute()` for low-level command execution and `GitCommandError` for failures. `branch.py` exports `current()` for getting the current branch name. `worktrees.py` provides the `Worktree` class and `git_worktree` context manager for isolated execution in separate working directories.
-
-The **CLI** (`src/antkeeper/cli.py`) is the entry point. It loads user-defined handlers from a Python file (default: `handlers.py`) and wires everything together. Supports positional file args and stdin piping for injecting prompts into state.
-
-### Framework Documentation
-
-For detailed framework development documentation, see `app_docs/`:
-- `app_docs/releasing.md` - Packaging, dependency management, PyPI release process
-- `app_docs/testing_policy.md` - Testing approach, fixture management, patterns
-- `app_docs/instrumentation.md` - Logging, state persistence, error handling
-- `app_docs/http_server.md` - HTTP server architecture and endpoint design
-- `app_docs/slack.md` - Slack integration details and runtime behavior
-
-For a concise reference card, see `CLAUDE.md`.
