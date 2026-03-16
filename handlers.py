@@ -6,6 +6,7 @@ data from the response, and threads it through state for downstream steps.
 
 from datetime import datetime
 
+from antkeeper import git
 from antkeeper.core.runner import Runner
 from antkeeper.core.domain import State
 from antkeeper.core.app import App, run_workflow
@@ -19,8 +20,6 @@ app = App()
 # --- Steps (factory-built) ---
 
 specify = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
-branch = cc_handler("/sdlc:branch $spec_file",
-                    state_updates=["branch_name"], label="branch")
 implement = cc_handler("/sdlc:implement $spec_file")
 document = cc_handler("/document this branch.")
 derive_feature = cc_handler(
@@ -30,6 +29,17 @@ derive_feature = cc_handler(
 
 
 # --- Steps (hand-written) ---
+@app.handler
+def branch(runner: Runner, state: State) -> State:
+    slug = state.get('slug')
+    if slug:
+        git.execute(['checkout', '-b', slug])
+        return {**state, "branch_name": slug}
+
+    fallback = cc_handler("/sdlc:branch $spec_file",
+                          state_updates=["branch_name"],
+                          label="branch")
+    return fallback(runner, state)
 
 
 @app.handler
