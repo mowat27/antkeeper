@@ -6,13 +6,16 @@ CLI workflow execution with dynamic handler loading.
 
 import argparse
 import io
+import json
 import os
+import subprocess
 import tempfile
 import textwrap
+from unittest.mock import Mock, patch
 
 import pytest
 
-from antkeeper.cli import main, parse_state_pairs
+from antkeeper.cli import build_issues_prompt, fetch_gh_issue, main, parse_state_pairs
 
 
 class TestParseStatePairs:
@@ -428,5 +431,309 @@ class TestCliIntegration:
             assert exc_info.value.code == 1
             captured = capsys.readouterr()
             assert "something went wrong" in captured.err
+        finally:
+            os.unlink(agents_path)
+
+
+class TestFetchGhIssue:
+    """Test suite for fetch_gh_issue function."""
+
+    def test_fetch_gh_issue_returns_parsed_json(self):
+        """Test that fetch_gh_issue parses and returns JSON from gh CLI."""
+        mock_response = {"number": 42, "title": "bug"}
+        with patch("antkeeper.cli.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(stdout=json.dumps(mock_response))
+            result = fetch_gh_issue(42)
+            assert result == mock_response
+            mock_run.assert_called_once()
+            args, kwargs = mock_run.call_args
+            assert kwargs["check"] is True
+
+    def test_fetch_gh_issue_raises_on_nonzero_returncode(self):
+        """Test that fetch_gh_issue propagates CalledProcessError."""
+        with patch("antkeeper.cli.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.CalledProcessError(1, "gh")
+            with pytest.raises(subprocess.CalledProcessError):
+                fetch_gh_issue(42)
+
+    def test_fetch_gh_issue_raises_on_gh_not_found(self):
+        """Test that fetch_gh_issue propagates FileNotFoundError."""
+        with patch("antkeeper.cli.subprocess.run") as mock_run:
+            mock_run.side_effect = FileNotFoundError()
+            with pytest.raises(FileNotFoundError):
+                fetch_gh_issue(42)
+
+    def test_fetch_gh_issue_raises_on_invalid_json(self):
+        """Test that fetch_gh_issue propagates JSONDecodeError."""
+        with patch("antkeeper.cli.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(stdout="not json")
+            with pytest.raises(json.JSONDecodeError):
+                fetch_gh_issue(42)
+
+
+class TestBuildIssuesPrompt:
+    """Test suite for build_issues_prompt function."""
+
+    def test_single_issue_prompt(self):
+        """Test prompt format for single issue."""
+        issue = {"number": 42, "title": "bug", "body": "description"}
+        prompt = build_issues_prompt([issue])
+        assert "Fix the following GitHub issue(s)." in prompt
+        assert "--- Issue #42 ---" in prompt
+        assert json.dumps(issue, indent=2) in prompt
+
+    def test_multiple_issues_prompt(self):
+        """Test prompt format for multiple issues."""
+        issues = [
+            {"number": 42, "title": "bug1"},
+            {"number": 99, "title": "bug2"},
+        ]
+        prompt = build_issues_prompt(issues)
+        assert "--- Issue #42 ---" in prompt
+        assert "--- Issue #99 ---" in prompt
+
+
+class TestFixGhIssuesArgParsing:
+    """Test suite for fix-gh-issues subcommand argument parsing."""
+
+    def _build_parser(self):
+        """Build and configure argument parser for testing."""
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        fgi_p = sub.add_parser("fix-gh-issues")
+        fgi_p.add_argument("--agents-file", default="handlers.py")
+        fgi_p.add_argument("--initial-state", action="append", default=[])
+        fgi_p.add_argument("--model", default=None)
+        fgi_p.add_argument("workflow_name")
+        fgi_p.add_argument("issue_numbers", nargs="+", type=int)
+        return parser
+
+    def test_parse_fix_gh_issues_with_single_issue(self):
+        """Test parsing fix-gh-issues with single issue number."""
+        args = self._build_parser().parse_args(["fix-gh-issues", "specify", "42"])
+        assert args.workflow_name == "specify"
+        assert args.issue_numbers == [42]
+
+    def test_parse_fix_gh_issues_with_multiple_issues(self):
+        """Test parsing fix-gh-issues with multiple issue numbers."""
+        args = self._build_parser().parse_args(["fix-gh-issues", "specify", "42", "99"])
+        assert args.issue_numbers == [42, 99]
+
+    def test_parse_fix_gh_issues_missing_issue_numbers_exits(self):
+        """Test that missing issue numbers causes parser to exit."""
+        with pytest.raises(SystemExit):
+            self._build_parser().parse_args(["fix-gh-issues", "specify"])
+
+    def test_parse_fix_gh_issues_with_model_flag(self):
+        """Test that --model flag is parsed."""
+        args = self._build_parser().parse_args([
+            "fix-gh-issues", "--model", "opus", "specify", "42"
+        ])
+        assert args.model == "opus"
+
+    def test_parse_fix_gh_issues_with_agents_file(self):
+        """Test that custom agents file path is correctly parsed."""
+        args = self._build_parser().parse_args([
+            "fix-gh-issues", "--agents-file", "custom.py", "specify", "42"
+        ])
+        assert args.agents_file == "custom.py"
+
+
+class TestFixGhIssuesIntegration:
+    """Integration tests for fix-gh-issues subcommand."""
+
+    def test_fix_gh_issues_fetches_and_runs(self, monkeypatch, capsys):
+        """Test fix-gh-issues fetches issue and runs workflow."""
+        log_dir = tempfile.mkdtemp()
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App
+            from antkeeper.core.domain import State
+
+            app = App(log_dir="{log_dir}")
+
+            @app.handler
+            def specify(runner, state: State) -> State:
+                return {{**state, "result": f"issues={{state['issue_numbers']}}"}}
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            mock_issue = {"number": 42, "title": "test issue", "body": "description"}
+            with patch("antkeeper.cli.subprocess.run") as mock_run:
+                mock_run.return_value = Mock(stdout=json.dumps(mock_issue))
+                monkeypatch.setattr("sys.argv", [
+                    "antkeeper", "fix-gh-issues",
+                    "--agents-file", agents_path,
+                    "specify", "42",
+                ])
+                main()
+                captured = capsys.readouterr()
+                assert "issues=[42]" in captured.out
+        finally:
+            os.unlink(agents_path)
+
+    def test_fix_gh_issues_multiple_issues(self, monkeypatch, capsys):
+        """Test fix-gh-issues fetches and merges multiple issues."""
+        log_dir = tempfile.mkdtemp()
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App
+            from antkeeper.core.domain import State
+
+            app = App(log_dir="{log_dir}")
+
+            @app.handler
+            def specify(runner, state: State) -> State:
+                return {{**state, "result": f"issues={{state['issue_numbers']}}"}}
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            issue1 = {"number": 42, "title": "bug1"}
+            issue2 = {"number": 99, "title": "bug2"}
+            with patch("antkeeper.cli.subprocess.run") as mock_run:
+                mock_run.side_effect = [
+                    Mock(stdout=json.dumps(issue1)),
+                    Mock(stdout=json.dumps(issue2)),
+                ]
+                monkeypatch.setattr("sys.argv", [
+                    "antkeeper", "fix-gh-issues",
+                    "--agents-file", agents_path,
+                    "specify", "42", "99",
+                ])
+                main()
+                captured = capsys.readouterr()
+                assert "issues=[42, 99]" in captured.out
+        finally:
+            os.unlink(agents_path)
+
+    def test_fix_gh_issues_gh_failure_exits(self, monkeypatch, capsys):
+        """Test fix-gh-issues exits with error on gh failure."""
+        log_dir = tempfile.mkdtemp()
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App
+            app = App(log_dir="{log_dir}")
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            with patch("antkeeper.cli.subprocess.run") as mock_run:
+                mock_run.side_effect = subprocess.CalledProcessError(
+                    1, "gh", stderr="not found"
+                )
+                monkeypatch.setattr("sys.argv", [
+                    "antkeeper", "fix-gh-issues",
+                    "--agents-file", agents_path,
+                    "specify", "42",
+                ])
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+                assert exc_info.value.code == 1
+                captured = capsys.readouterr()
+                assert "Failed to fetch issue" in captured.err
+        finally:
+            os.unlink(agents_path)
+
+    def test_fix_gh_issues_gh_not_found_exits(self, monkeypatch, capsys):
+        """Test fix-gh-issues exits with error if gh not installed."""
+        log_dir = tempfile.mkdtemp()
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App
+            app = App(log_dir="{log_dir}")
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            with patch("antkeeper.cli.subprocess.run") as mock_run:
+                mock_run.side_effect = FileNotFoundError()
+                monkeypatch.setattr("sys.argv", [
+                    "antkeeper", "fix-gh-issues",
+                    "--agents-file", agents_path,
+                    "specify", "42",
+                ])
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+                assert exc_info.value.code == 1
+                captured = capsys.readouterr()
+                assert "`gh` CLI not found" in captured.err
+        finally:
+            os.unlink(agents_path)
+
+    def test_fix_gh_issues_model_merged(self, monkeypatch, capsys):
+        """Test fix-gh-issues merges --model into state."""
+        log_dir = tempfile.mkdtemp()
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App
+            from antkeeper.core.domain import State
+
+            app = App(log_dir="{log_dir}")
+
+            @app.handler
+            def specify(runner, state: State) -> State:
+                return {{**state, "result": f"model={{state.get('model')}}"}}
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            mock_issue = {"number": 42, "title": "test"}
+            with patch("antkeeper.cli.subprocess.run") as mock_run:
+                mock_run.return_value = Mock(stdout=json.dumps(mock_issue))
+                monkeypatch.setattr("sys.argv", [
+                    "antkeeper", "fix-gh-issues",
+                    "--agents-file", agents_path,
+                    "--model", "opus",
+                    "specify", "42",
+                ])
+                main()
+                captured = capsys.readouterr()
+                assert "model=opus" in captured.out
+        finally:
+            os.unlink(agents_path)
+
+    def test_fix_gh_issues_initial_state_merged(self, monkeypatch, capsys):
+        """Test fix-gh-issues merges --initial-state into state."""
+        log_dir = tempfile.mkdtemp()
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App
+            from antkeeper.core.domain import State
+
+            app = App(log_dir="{log_dir}")
+
+            @app.handler
+            def specify(runner, state: State) -> State:
+                return {{**state, "result": f"custom={{state.get('custom_key')}}"}}
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            mock_issue = {"number": 42, "title": "test"}
+            with patch("antkeeper.cli.subprocess.run") as mock_run:
+                mock_run.return_value = Mock(stdout=json.dumps(mock_issue))
+                monkeypatch.setattr("sys.argv", [
+                    "antkeeper", "fix-gh-issues",
+                    "--agents-file", agents_path,
+                    "--initial-state", "custom_key=custom_value",
+                    "specify", "42",
+                ])
+                main()
+                captured = capsys.readouterr()
+                assert "custom=custom_value" in captured.out
         finally:
             os.unlink(agents_path)
