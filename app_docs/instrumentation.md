@@ -165,16 +165,18 @@ Module-level loggers exist in `cli.py`, `channels/cli.py`, `channels/slack.py`, 
 
 The `cc_handler` factory (`antkeeper.handlers.claude_code.factories`) eliminates boilerplate for building Claude Code handlers. It produces `(Runner, State) -> State` callables in two modes:
 
-- **Fire-and-forget mode** — run the LLM command and return state unchanged.
-- **JSON mode** — wrap the command with JSON instructions, parse the LLM response, and merge specific fields into state.
+- **Fire-and-forget mode** — run the LLM command with a single `run_prompt` call and return state unchanged.
+- **Extraction mode** — run the command first (Step 1), then send the response to haiku via `_extraction_prompt` (Step 2) to extract structured JSON fields. Parse the result with `extract_json` and merge the requested `state_updates` fields into state.
+
+The extraction step always uses the `haiku` model (constant `_EXTRACTION_MODEL`), regardless of the handler's configured model. This is an implementation detail, not a caller-facing knob.
 
 ```python
 from antkeeper.handlers.claude_code import cc_handler
 
-# Fire-and-forget mode: run LLM, return state unchanged
+# Fire-and-forget mode: single run_prompt call, return state unchanged
 implement = cc_handler("/implement $spec_file")
 
-# JSON mode: run LLM, parse JSON response, extract spec_file and slug into state
+# Extraction mode: two run_prompt calls — raw prompt then extraction prompt to haiku
 specify = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
 ```
 

@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-16 (claude-json-output-mode)
+# Last validated: 2026-03-16 (cc-handler-two-step-extraction)
 
 overview:
   name: antkeeper
@@ -105,11 +105,11 @@ architecture:
     - name: helpers
       path: src/antkeeper/helpers/
       responsibility: >
-        Shared utility functions. Contains JSON extraction, JSON prompt building,
-        and timestamp/log-directory helpers for handler code.
+        Shared utility functions. Contains JSON extraction and
+        timestamp/log-directory helpers for handler code.
       modules:
-        - __init__.py  # Re-exports extract_json, json_prompt, make_timestamp, make_log_dir via __all__
-        - json.py  # extract_json — finds first {…} in text, parses as JSON; json_prompt — appends JSON output instructions to a prompt
+        - __init__.py  # Re-exports extract_json, make_timestamp, make_log_dir via __all__
+        - json.py  # extract_json — finds first {…} in text, parses as JSON
         - timestamps.py  # make_timestamp — current time as YYYYMMDDHHmmss string; make_log_dir — factory returning callable (runner) -> log dir path
 
     - name: http
@@ -147,7 +147,9 @@ architecture:
         Package-level re-exports. Exports all major public types via __all__:
         App, Runner, run_workflow, State, Channel, WorkflowFailedError,
         CliChannel, ApiChannel, SlackChannel, Worktree, git_worktree,
-        make_log_dir, make_timestamp. Allows users to import from antkeeper directly.
+        make_log_dir, make_timestamp. Note: extract_json and json_prompt are
+        NOT exported here; extract_json is imported directly from
+        antkeeper.helpers.json when needed. json_prompt has been removed.
 
     - name: package_main
       path: src/antkeeper/__main__.py
@@ -440,16 +442,8 @@ helper_functions:
     responsibility: >
       Finds first '{' and last '}' in text, extracts substring, parses as JSON.
       Raises ValueError if no braces found or JSON is invalid. Handles LLM
-      responses wrapped in markdown code fences or prose.
-
-  json_prompt:
-    file: src/antkeeper/helpers/json.py
-    signature: "json_prompt(prompt: str, *, required_fields: list[str]) -> str"
-    responsibility: >
-      Appends JSON output instructions and an example object to a prompt.
-      Builds example dict {field: '<field>'} for each required field, appends
-      "return ONLY a JSON object: ..." instruction. Used by cc_handler to
-      instruct the LLM to respond with structured JSON.
+      responses wrapped in markdown code fences or prose. Used by cc_handler
+      extraction step to parse the haiku response.
 
   make_timestamp:
     file: src/antkeeper/helpers/timestamps.py
@@ -476,8 +470,16 @@ handler_factories:
     returns: "Handler Protocol — callable (Runner, State) -> State with __name__ attribute"
     responsibility: >
       Factory producing (Runner, State) -> State handler functions in two modes:
-      fire-and-forget mode (state_updates absent or empty) and JSON mode (state_updates
+      fire-and-forget mode (state_updates absent or empty) and extraction mode (state_updates
       contains field names). An optional model argument overrides the LLM model per-handler.
+    constants:
+      _EXTRACTION_MODEL: "'haiku' — model always used for the extraction step in extraction mode"
+    private_functions:
+      _extraction_prompt: >
+        _extraction_prompt(response: str, *, required_fields: list[str]) -> str.
+        Builds a prompt instructing the extraction model to extract named fields from
+        a previous LLM response. Returns a JSON object with those fields (null if absent).
+        No markdown fences in the output. Used only in extraction mode.
     behavior:
       label_derivation: "Default label = first token of command with leading '/' stripped. Custom label overrides."
       handler.__name__: "Set to label for framework introspection (compatible with app.add_handler())."
@@ -489,19 +491,25 @@ handler_factories:
       fire_and_forget_mode: >
         When state_updates is None or empty: runs interpolated command via run_prompt,
         returns state unchanged. No JSON parsing.
-      json_mode: >
-        When state_updates is non-empty: wraps interpolated command with
-        json_prompt(required_fields=state_updates), calls run_prompt, calls extract_json
-        on response, picks only the listed fields from parsed dict, merges into state.
-        Missing field in response raises KeyError, caught and routed to runner.fail().
+      extraction_mode: >
+        When state_updates is non-empty: TWO run_prompt calls are made.
+        Step 1 — sends interpolated command to the primary model (factory model or state['model']).
+        Step 2 — sends _extraction_prompt(response, required_fields=state_updates) to
+        _EXTRACTION_MODEL ("haiku") to extract structured JSON. The extraction model is
+        always "haiku" regardless of the factory or state model.
+        Calls extract_json on the extraction response, picks only the listed fields from
+        parsed dict, merges into state. Missing field in response raises KeyError, caught
+        and routed to runner.fail().
       model_resolution: >
-        model=model if model is not None else state.get("model"). Factory-level model
-        takes precedence over state['model']. When neither is set, run_prompt receives
+        Primary step: model=model if model is not None else state.get("model"). Factory-level
+        model takes precedence over state['model']. When neither is set, run_prompt receives
         model=None (uses ClaudeCodeAgent default).
+        Extraction step: always uses _EXTRACTION_MODEL ("haiku"), ignoring factory/state model.
       error_handling: >
         Single try/except catches KeyError (missing state key or JSON field),
-        AgentExecutionError (LLM failure), and ValueError (bad JSON).
+        AgentExecutionError (LLM failure in either step), and ValueError (bad JSON).
         All route to runner.fail(f"{label} failed: {error}") -> WorkflowFailedError.
+        Step 1 failure short-circuits before step 2 is called.
       progress: "Reports 'Running {label}' before and '{label} complete' after via runner.report_progress."
 
   handlers_package_exports:
@@ -747,12 +755,12 @@ data_flow:
   llm_path:
     - "cc_handler factory builds handler with command, state_updates, label, model captured in closure"
     - "Handler interpolates $var placeholders from state via regex"
-    - "If state_updates: wraps command with json_prompt; otherwise uses raw command"
-    - "Calls run_prompt(prompt, runner.logger, model=model if model is not None else state.get('model'))"
+    - "Step 1: Calls run_prompt(interpolated_command, runner.logger, model=primary_model)"
     - "run_prompt creates ClaudeCodeAgent(model=model, yolo=True), calls agent.prompt()"
     - "Agent runs subprocess `claude --output-format json -p` -> parses JSON envelope, returns data['result']"
-    - "If state_updates: extract_json parses response, picks listed fields, merges into state"
-    - "If fire-and-forget: returns state unchanged"
+    - "If fire-and-forget (no state_updates): returns state unchanged"
+    - "If extraction mode (state_updates non-empty): Step 2 — calls run_prompt(_extraction_prompt(response, required_fields=state_updates), runner.logger, model='haiku')"
+    - "extract_json parses extraction response, picks only listed fields, merges into state"
   worktree_iso_path:
     - "sdlc_iso calls derive_feature to get feature_type and slug"
     - "Creates Worktree(base_dir=runner.app.worktree_dir, name='{timestamp}-{run_id}')"
@@ -830,7 +838,7 @@ testing_design:
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler: label derivation (default strips slash, first token, custom override), JSON mode (extracts only named fields, wraps with json_prompt, progress messages, single field), fire-and-forget mode (returns state unchanged, empty list is fire-and-forget, progress messages), $var interpolation (substitution, multiple vars, no vars passthrough, non-string str() conversion, ${var} not interpolated), model override (factory model passed to run_prompt, factory beats state model, fallback to state when no override), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field)
+    - tests/handlers/test_factories.py — cc_handler: label derivation (default strips slash, first token, custom override), extraction mode (extracts only named fields, two-step run-then-extract pattern verified via mock call count + args, progress messages, single field, extraction always uses haiku even when handler has different model, step 1 failure skips step 2, step 2 failure causes WorkflowFailedError), fire-and-forget mode (returns state unchanged, empty list is fire-and-forget, progress messages), $var interpolation (substitution, multiple vars, no vars passthrough, non-string str() conversion, ${var} not interpolated), model override (factory model passed to run_prompt for step 1, factory beats state model, fallback to state when no override), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field)
 
 key_design_decisions:
   - >
@@ -869,11 +877,14 @@ key_design_decisions:
     Per-run file logging. Each Runner creates an isolated log file. No console
     logging from the framework. Module-level loggers provide debug tracing.
   - >
-    cc_handler factory. src/antkeeper/handlers/claude_code/factories.py provides
-    cc_handler, a factory that eliminates boilerplate for handlers that run an LLM
-    command and either return state unchanged (fire-and-forget) or parse named fields
-    from a JSON response (state_updates mode). An optional model keyword argument
-    pins the LLM model at factory time, overriding state['model'] when provided.
+    cc_handler factory with two-step extraction. src/antkeeper/handlers/claude_code/factories.py
+    provides cc_handler, a factory that eliminates boilerplate for handlers that run an LLM
+    command and either return state unchanged (fire-and-forget) or extract named fields via a
+    second LLM call (extraction mode). In extraction mode, step 1 sends the command to the
+    primary model; step 2 sends _extraction_prompt(response, required_fields) to "haiku"
+    (_EXTRACTION_MODEL) to extract structured JSON — decoupling the work model from the
+    extraction step. An optional model keyword argument pins the primary LLM model at factory
+    time, overriding state['model']; the extraction step always uses "haiku" regardless.
     Handlers built by the factory have __name__ set to their label for use with
     app.add_handler(). The claude_code __init__.py re-exports cc_handler only —
     there is no pre-built App or pre-registered handlers.

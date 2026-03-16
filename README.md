@@ -361,7 +361,7 @@ The **http layer** (`src/antkeeper/http/`) contains HTTP endpoint logic:
 - `slack_events.py` exports `SlackEventProcessor` class (POST `/slack_event` implementation with debounce state)
 - `server.py` in the root defines routes with `@api.post()` decorators and delegates to these modules
 
-The **handlers layer** (`src/antkeeper/handlers/`) contains pre-built handler collections. `handlers/claude_code/` provides 11 SDLC handlers using Claude Code as the LLM backend, exportable as a module-level `app` instance. `factories.py` inside that package exports `cc_handler`, a factory for building `(Runner, State) -> State` handlers in simple mode (static state updates) or JSON mode (LLM response parsing) without boilerplate.
+The **handlers layer** (`src/antkeeper/handlers/`) contains pre-built handler collections. `handlers/claude_code/` provides 11 SDLC handlers using Claude Code as the LLM backend, exportable as a module-level `app` instance. `factories.py` inside that package exports `cc_handler`, a factory for building `(Runner, State) -> State` handlers in fire-and-forget mode (single LLM call, state unchanged) or extraction mode (two sequential `run_prompt` calls — raw prompt to the configured model, then extraction prompt to haiku — to parse structured fields into state) without boilerplate.
 
 The **llm layer** (`src/antkeeper/llm/`) abstracts LLM interactions behind the `Agent` protocol. `ClaudeCodeAgent` is the concrete implementation. Add new LLM backends by implementing `prompt(str) -> str`.
 
