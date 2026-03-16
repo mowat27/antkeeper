@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-14 (feat/cc-handler-model-override)
+# Last validated: 2026-03-16 (claude-json-output-mode)
 
 overview:
   name: antkeeper
@@ -413,12 +413,15 @@ llm_types:
       prompt: >
         Builds command: ['claude'] + [--model model] (if model set and not in opts)
         + [--dangerously-skip-permissions] (if yolo and not in opts)
-        + opts + ['-p', prompt]. Runs via subprocess.
-        Returns stdout on success. Logs prompt submission, response, and errors
-        via module logger.
+        + [--output-format json] (if not in opts) + opts + ['-p', prompt].
+        Runs via subprocess. Parses stdout as JSON envelope, returns data["result"].
+        Logs prompt/response lengths at INFO, full content + telemetry
+        (session_id, duration_ms, usage, total_cost_usd) at DEBUG.
       errors:
         - "Non-zero exit -> AgentExecutionError with stderr"
         - "Missing binary -> AgentExecutionError('claude binary not found')"
+        - "Non-JSON stdout -> ValueError('Claude returned non-JSON output: ...')"
+        - "Envelope missing 'result' key -> ValueError('Claude JSON envelope missing result field: ...')"
 
   run_prompt:
     file: src/antkeeper/llm/claude_code.py
@@ -747,14 +750,14 @@ data_flow:
     - "If state_updates: wraps command with json_prompt; otherwise uses raw command"
     - "Calls run_prompt(prompt, runner.logger, model=model if model is not None else state.get('model'))"
     - "run_prompt creates ClaudeCodeAgent(model=model, yolo=True), calls agent.prompt()"
-    - "Agent runs subprocess `claude -p` -> stdout returned"
+    - "Agent runs subprocess `claude --output-format json -p` -> parses JSON envelope, returns data['result']"
     - "If state_updates: extract_json parses response, picks listed fields, merges into state"
     - "If fire-and-forget: returns state unchanged"
   worktree_iso_path:
     - "sdlc_iso calls derive_feature to get feature_type and slug"
     - "Creates Worktree(base_dir=runner.app.worktree_dir, name='{timestamp}-{run_id}')"
     - "Enters git_worktree(wt, create=True, branch='{feature_type}/{slug}', remove=False)"
-    - "Inside worktree: runs specify -> commit -> implement -> commit -> push -> raise_a_pr via run_workflow"
+    - "Inside worktree: runs specify -> implement -> document via run_workflow"
     - "On exit: cwd restored, worktree kept on disk for inspection"
     - "Returns state with worktree_path and branch_name added"
   slack_happy_path:
@@ -820,7 +823,7 @@ testing_design:
     - tests/test_server.py — FastAPI webhook endpoint (returns run_id, 404 for unknown workflow, 422 for invalid body)
     - tests/channels/test_slack_channel.py — SlackChannel type, initial_state, report_progress/error posts, HTTP failure resilience
     - tests/test_slack_server.py — Slack event endpoint (url_verification, bot filter, mention, edit, reply, delete, timer dispatch, unknown workflow, dedup, env var validation)
-    - tests/llm/test_claude_code_agent.py — ClaudeCodeAgent subprocess and error handling
+    - tests/llm/test_claude_code_agent.py — ClaudeCodeAgent: TestClaudeCodeAgent (subprocess delegation, model/yolo/opts flags, missing binary), TestJsonOutputMode (--output-format json always present, no duplication in opts, envelope parsing returns result field, non-JSON raises ValueError, missing result key raises ValueError, telemetry logged at DEBUG, partial envelope OK), TestIntegration (fake agent in runner, AgentExecutionError propagates)
     - tests/helpers/test_extract_json.py — JSON extraction from LLM responses
     - tests/helpers/test_timestamps.py — make_timestamp format, make_log_dir returns callable, produces correct path, timestamp captured at call time
     - tests/git/test_worktree.py — Worktree class (path, exists, create, create+branch, remove, errors)

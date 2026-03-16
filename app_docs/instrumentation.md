@@ -258,16 +258,39 @@ agent = ClaudeCodeAgent(model="sonnet", yolo=True, opts=["--fast"])
 - **yolo** (`bool`): When True, passes `--dangerously-skip-permissions` to skip permission prompts.
 - **opts** (`list[str] | None`): Arbitrary CLI arguments. When opts contains a flag that matches a convenience param (e.g., `--model`), the opts version takes precedence.
 
+### JSON Output and Telemetry
+
+`ClaudeCodeAgent.prompt()` always passes `--output-format json` to the Claude CLI (unless the caller already includes `--output-format` in `opts`). It parses the JSON envelope from stdout and returns `data["result"]` — the plain string result. Callers see no change in the return type.
+
+After each successful call, the following fields are logged at DEBUG level on the `antkeeper.llm.claude_code` logger:
+
+```
+LLM session_id=<id> duration_ms=<ms> usage=<dict> cost=<usd>
+```
+
+All fields are read via `.get()` and may be `None` if absent from the envelope. To correlate a run with its Claude session transcript, use the logged `session_id` to locate:
+
+```
+~/.claude/projects/<project>/<session_id>.jsonl
+```
+
 ### Error Handling
 
-The agent reports subprocess execution failures via `AgentExecutionError`:
+The agent raises two distinct exception types:
+
+- **`AgentExecutionError`** — subprocess execution failures: binary not found, or non-zero exit code.
+- **`ValueError`** — output parse failures: stdout is not valid JSON, or the parsed envelope is missing the `result` field. The error message includes a truncated excerpt of raw stdout for diagnostics.
 
 ```python
 try:
     response = agent.prompt("/specify build a feature")
 except AgentExecutionError as e:
     runner.fail(f"Agent failed: {e}")
+except ValueError as e:
+    runner.fail(f"Unexpected LLM output: {e}")
 ```
+
+The `cc_handler` factory catches both `AgentExecutionError` and `ValueError` and routes them through `runner.fail()`.
 
 No automatic retry or telemetry. Handlers are responsible for error handling policy.
 

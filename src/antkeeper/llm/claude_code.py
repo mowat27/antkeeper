@@ -5,6 +5,7 @@ by delegating to the `claude` CLI subprocess. The agent wraps subprocess
 calls and handles command construction, error reporting, and response parsing.
 """
 
+import json
 import logging
 import subprocess
 
@@ -53,21 +54,24 @@ class ClaudeCodeAgent:
         )
 
     def prompt(self, prompt: str) -> str:
-        """Execute a prompt via `claude -p` and return stdout.
+        """Execute a prompt via `claude -p` and return the result field.
 
         Constructs a subprocess call to the Claude CLI with the -p flag for
-        prompt execution. If a model was specified during initialization, adds
-        the --model flag. Logs all prompt activity and responses.
+        prompt execution and --output-format json for structured output. If a
+        model was specified during initialization, adds the --model flag. Logs
+        all prompt activity, telemetry, and responses.
 
         Args:
             prompt: The prompt string to send to Claude Code CLI.
 
         Returns:
-            The CLI's response as a string (stdout).
+            The `result` field from the Claude JSON envelope.
 
         Raises:
             AgentExecutionError: If the claude binary is not found or if the
                 subprocess exits with a non-zero status code.
+            ValueError: If stdout cannot be parsed as JSON or if the parsed
+                envelope is missing the `result` field.
 
         """
         opts_list = self.opts or []
@@ -76,6 +80,8 @@ class ClaudeCodeAgent:
             cmd.extend(["--model", self.model])
         if self.yolo and "--dangerously-skip-permissions" not in opts_list:
             cmd.append("--dangerously-skip-permissions")
+        if "--output-format" not in opts_list:
+            cmd.extend(["--output-format", "json"])
         cmd.extend(opts_list)
         cmd.extend(["-p", prompt])
         logger.info(f"LLM prompt submitted (length={len(prompt)} chars)")
@@ -91,9 +97,26 @@ class ClaudeCodeAgent:
             raise AgentExecutionError(
                 f"claude exited with code {result.returncode}: {result.stderr}"
             )
-        logger.info(f"LLM response received (length={len(result.stdout)} chars)")
-        logger.debug(f"LLM response content: {result.stdout}")
-        return result.stdout
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raise ValueError(f"Claude returned non-JSON output: {result.stdout[:200]!r}")
+        try:
+            response = data["result"]
+        except KeyError:
+            raise ValueError(
+                f"Claude JSON envelope missing 'result' field: {result.stdout[:200]!r}"
+            )
+        logger.debug(
+            "LLM session_id=%s duration_ms=%s usage=%s cost=%s",
+            data.get("session_id"),
+            data.get("duration_ms"),
+            data.get("usage"),
+            data.get("total_cost_usd"),
+        )
+        logger.info(f"LLM response received (length={len(response)} chars)")
+        logger.debug(f"LLM response content: {response}")
+        return response
 
 
 def run_prompt(prompt: str, logger: logging.Logger, model: str | None = None) -> str:

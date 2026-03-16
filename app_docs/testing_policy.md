@@ -276,6 +276,41 @@ Tests for state persistence (`tests/core/test_state_persistence.py`) verify:
 - **`test_initial_progress_persisted_before_first_step`** — reads the state file from disk inside the first step and asserts `_progress == {"total": 1, "completed": 0}`. This is the regression test for the bug where `_progress` was not persisted until after the first step completed. Uses `open(runner._state_path)` + `json.load()` directly to verify what is on disk, not just in memory.
 - **`test_single_handler_run_has_no_progress`** — `Runner.run()` used directly (without `run_workflow`) produces no `_progress` key
 
+### LLM Agent Testing Patterns
+
+Tests for `ClaudeCodeAgent` (`tests/llm/test_claude_code_agent.py`) patch `subprocess.run` at the boundary — no real subprocess invocations.
+
+**`_envelope()` helper** — a module-level helper builds valid JSON envelopes for use as mock subprocess stdout:
+
+```python
+def _envelope(result="ok", session_id="s1", duration_ms=100, usage=None, total_cost_usd=0.0):
+    return json.dumps({
+        "type": "result", "subtype": "success",
+        "result": result, "session_id": session_id,
+        "duration_ms": duration_ms, "usage": usage or {},
+        "total_cost_usd": total_cost_usd,
+    })
+```
+
+All tests that mock a successful subprocess response use `_envelope()` to produce the stdout value. Tests for error paths (non-zero exit, binary not found) do not need an envelope.
+
+**`TestJsonOutputMode` test class** — groups tests for JSON envelope parsing, telemetry logging, and edge cases:
+
+- `test_output_format_json_flag_always_present` / `test_output_format_not_duplicated_when_in_opts` — flag injection and deduplication
+- `test_invalid_json_raises_value_error` / `test_missing_result_key_raises_value_error` — `ValueError` paths
+- `test_telemetry_logged_at_debug` — uses `caplog.at_level(logging.DEBUG, logger="antkeeper.llm.claude_code")` to assert `session_id` and `duration_ms` values appear in debug records
+- Edge cases: `test_empty_result_string_returned`, `test_missing_session_id_does_not_raise`, `test_none_total_cost_does_not_raise`
+
+**Telemetry log testing** — use pytest's built-in `caplog` fixture; no manual logger patching needed:
+
+```python
+def test_telemetry_logged_at_debug(self, caplog):
+    with caplog.at_level(logging.DEBUG, logger="antkeeper.llm.claude_code"):
+        agent.prompt("hello")
+    debug_text = " ".join(r.message for r in caplog.records)
+    assert "abc123" in debug_text
+```
+
 ### Handler Factory Testing Patterns
 
 Tests for the `cc_handler` factory (`tests/handlers/test_factories.py`) unit-test the factory in isolation by mocking the LLM layer.
