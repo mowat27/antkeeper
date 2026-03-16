@@ -173,6 +173,21 @@ def build_issues_prompt(issues: list[dict]) -> str:
     return "".join(parts)
 
 
+def _build_common_state(args) -> dict:
+    """Build initial state from shared CLI flags.
+
+    Args:
+        args: Parsed argparse namespace with initial_state and model attributes.
+
+    Returns:
+        dict: State dictionary with parsed pairs and optional model.
+    """
+    state = parse_state_pairs(args.initial_state)
+    if args.model is not None:
+        state["model"] = args.model
+    return state
+
+
 def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict) -> None:
     """Execute a workflow via CLI channel.
 
@@ -228,6 +243,16 @@ def main() -> None:
                 into state["prompt"]. If no files given and stdin is piped,
                 stdin is read as the prompt.
 
+        fix-gh-issues: Fetch GitHub issues and run a workflow against them:
+            --agents-file: Path to Python file containing the app
+                (default: handlers.py)
+            --initial-state: Key=value pairs for initial workflow state
+                (repeatable)
+            --model: Model identifier to use for LLM operations
+            workflow_name: Name of the workflow to execute (positional)
+            issue_numbers: One or more GitHub issue numbers to fetch and
+                pass as state["prompt"] and state["issue_numbers"].
+
         server: Start the FastAPI server with the following options:
             --host: Host address to bind (default: 127.0.0.1)
             --port: Port number to bind (default: 8000)
@@ -255,18 +280,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="antkeeper")
     subparsers = parser.add_subparsers(dest="command")
 
-    run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--agents-file", default="handlers.py")
-    run_parser.add_argument("--initial-state", action="append", default=[])
-    run_parser.add_argument("--model", default=None)
-    run_parser.add_argument("workflow_name")
+    common_run_parent = argparse.ArgumentParser(add_help=False)
+    common_run_parent.add_argument("--agents-file", default="handlers.py")
+    common_run_parent.add_argument("--initial-state", action="append", default=[])
+    common_run_parent.add_argument("--model", default=None)
+    common_run_parent.add_argument("workflow_name")
+
+    run_parser = subparsers.add_parser("run", parents=[common_run_parent])
     run_parser.add_argument("prompt_files", nargs="*")
 
-    fix_gh_issues_parser = subparsers.add_parser("fix-gh-issues")
-    fix_gh_issues_parser.add_argument("--agents-file", default="handlers.py")
-    fix_gh_issues_parser.add_argument("--initial-state", action="append", default=[])
-    fix_gh_issues_parser.add_argument("--model", default=None)
-    fix_gh_issues_parser.add_argument("workflow_name")
+    fix_gh_issues_parser = subparsers.add_parser("fix-gh-issues", parents=[common_run_parent])
     fix_gh_issues_parser.add_argument("issue_numbers", nargs="+", type=int)
 
     server_parser = subparsers.add_parser("server")
@@ -287,7 +310,7 @@ def main() -> None:
     logger.debug(f"CLI args parsed: command={args.command}")
 
     if args.command == "run":
-        state = parse_state_pairs(args.initial_state)
+        state = _build_common_state(args)
         if args.prompt_files:
             parts = []
             for path in args.prompt_files:
@@ -300,8 +323,6 @@ def main() -> None:
             state["prompt"] = "".join(parts)
         elif not sys.stdin.isatty():
             state["prompt"] = sys.stdin.read()
-        if args.model is not None:
-            state["model"] = args.model
         _run_workflow_cli(args.agents_file, args.workflow_name, state)
 
     elif args.command == "fix-gh-issues":
@@ -319,11 +340,9 @@ def main() -> None:
             print("Unexpected response from `gh` CLI", file=sys.stderr)
             sys.exit(1)
 
-        state = parse_state_pairs(args.initial_state)
+        state = _build_common_state(args)
         state["prompt"] = build_issues_prompt(issues)
         state["issue_numbers"] = args.issue_numbers
-        if args.model is not None:
-            state["model"] = args.model
         _run_workflow_cli(args.agents_file, args.workflow_name, state)
 
     elif args.command == "init":

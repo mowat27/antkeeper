@@ -47,11 +47,12 @@ class TestArgParsing:
         """
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="command")
-        run_p = sub.add_parser("run")
-        run_p.add_argument("--agents-file", default="handlers.py")
-        run_p.add_argument("--initial-state", action="append", default=[])
-        run_p.add_argument("--model", default=None)
-        run_p.add_argument("workflow_name")
+        common = argparse.ArgumentParser(add_help=False)
+        common.add_argument("--agents-file", default="handlers.py")
+        common.add_argument("--initial-state", action="append", default=[])
+        common.add_argument("--model", default=None)
+        common.add_argument("workflow_name")
+        run_p = sub.add_parser("run", parents=[common])
         run_p.add_argument("prompt_files", nargs="*")
         return parser
 
@@ -85,6 +86,11 @@ class TestInitArgParsing:
     """Test suite for init subcommand argument parsing."""
 
     def _build_parser(self):
+        """Build and configure argument parser for init subcommand testing.
+
+        Returns:
+            argparse.ArgumentParser: Configured parser with init subcommand.
+        """
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="command")
         init_p = sub.add_parser("init")
@@ -497,14 +503,19 @@ class TestFixGhIssuesArgParsing:
     """Test suite for fix-gh-issues subcommand argument parsing."""
 
     def _build_parser(self):
-        """Build and configure argument parser for testing."""
+        """Build and configure argument parser for fix-gh-issues subcommand testing.
+
+        Returns:
+            argparse.ArgumentParser: Configured parser with fix-gh-issues subcommand.
+        """
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="command")
-        fgi_p = sub.add_parser("fix-gh-issues")
-        fgi_p.add_argument("--agents-file", default="handlers.py")
-        fgi_p.add_argument("--initial-state", action="append", default=[])
-        fgi_p.add_argument("--model", default=None)
-        fgi_p.add_argument("workflow_name")
+        common = argparse.ArgumentParser(add_help=False)
+        common.add_argument("--agents-file", default="handlers.py")
+        common.add_argument("--initial-state", action="append", default=[])
+        common.add_argument("--model", default=None)
+        common.add_argument("workflow_name")
+        fgi_p = sub.add_parser("fix-gh-issues", parents=[common])
         fgi_p.add_argument("issue_numbers", nargs="+", type=int)
         return parser
 
