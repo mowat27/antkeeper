@@ -1,32 +1,32 @@
 # Antkeeper
 
-A lightweight Python workflow engine for building agentic workflows you can run AFK. Define workflow steps, wire them to I/O channels (CLI, API, Slack), and walk away.
+A lightweight Python workflow engine for agentic workflows that run AFK. Define workflow steps, wire them to I/O channels (CLI, API, Slack), and walk away.
 
 ## Who This Is For
 
-If you're building agentic workflows — LLM-driven pipelines that spec out features, write code, create branches, open PRs — and you want them to run reliably without you watching, Antkeeper was built for this.
+Engineers building agentic workflows — LLM-driven pipelines that spec out features, write code, create branches, open PRs — that need to run reliably without supervision.
 
-If you work in one repo and your automation is a single script, you probably don't need this. But once you're running similar agentic workflows across multiple projects, the duplication in wiring, error handling, and state management starts to hurt.
+Once you're running similar workflows across multiple projects, the duplication in wiring, error handling, and state management becomes the bottleneck. Antkeeper extracts that into a framework.
 
 ## The Problem
 
-As you build with AI agents, you accumulate scripts that chain LLM calls together into workflows. A typical one might: take a prompt, generate a spec, create a branch, implement the feature, then document the changes. These scripts tend to:
+As you build with AI agents, you accumulate scripts that chain LLM calls into workflows. A typical one might take a prompt, generate a spec, create a branch, implement a feature, then document the changes. These scripts tend to:
 
-- **Lose state** — if a step fails halfway through, you start from scratch. You can't walk away from the keyboard because there's no way to recover.
-- **Duplicate wiring** — every script re-implements argument parsing, error handling, progress reporting, and LLM integration. Across multiple repos, this adds up fast.
-- **Lock you into one surface** — a CLI script can't easily become a Slack bot or an API endpoint. But you want to trigger the same workflow from all three.
-- **Bind to one agent** — your workflow is hardwired to one LLM tool. Switching from Claude Code to Codex or a local model means rewriting everything.
-- **Hide what's happening** — no logging, no observability, no way to track progress. When something fails at 2am, you have no idea what happened.
+- **Lose state** — a failure mid-workflow means starting from scratch. No recovery, no way to run unattended.
+- **Duplicate wiring** — every script re-implements argument parsing, error handling, progress reporting, and LLM integration. Across repos, this compounds.
+- **Lock to one surface** — a CLI script cannot easily become a Slack bot or an API endpoint, but you need the same workflow from all three.
+- **Bind to one agent** — the workflow is hardwired to one LLM tool. Switching from Claude Code to Codex or a local model means rewriting.
+- **Hide what happened** — no logging, no observability, no progress tracking. When something fails at 2am, there is no trail.
 
 ## How It Works
 
 Antkeeper draws on two ideas:
 
-**From Flask** — use decorators to register entry points and let the framework handle the wiring. In Flask, `@app.route("/hello")` binds a function to a URL. In Antkeeper, `@app.handler` registers a function as a workflow step that can be triggered from any channel.
+**From Flask** — decorators register entry points and the framework handles the wiring. In Flask, `@app.route("/hello")` binds a function to a URL. In Antkeeper, `@app.handler` registers a function as a workflow step that can be triggered from any channel.
 
-**From Redux** — state is a plain dictionary that flows through pure functions. Each handler receives the current state and returns a new one, like a Redux reducer. Handlers never mutate state — they always return a fresh dict. This makes workflows predictable, testable, and recoverable: state is persisted after every step, so if something fails, you know exactly where it got to.
+**From Redux** — state is a plain dictionary that flows through pure functions. Each handler receives the current state and returns a new one, like a reducer. Handlers never mutate state — they return a fresh dict. State is persisted after every step, so a failure at step 3 of 5 preserves the output of steps 1 and 2.
 
-Here's what a real workflow looks like — an SDLC pipeline that takes a prompt and turns it into a specified, implemented, documented feature on a new branch:
+An SDLC pipeline that takes a prompt and produces a specified, implemented, documented feature on a new branch:
 
 ```python
 from antkeeper.core.app import App, run_workflow
@@ -36,7 +36,7 @@ from antkeeper.handlers.claude_code import cc_handler
 
 app = App()
 
-# Factory-built steps — each one runs an LLM command and threads results through state
+# Factory-built steps: run an LLM command and thread results through state
 specify    = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
 implement  = cc_handler("/sdlc:implement $spec_file")
 document   = cc_handler("/document this branch.")
@@ -51,55 +51,54 @@ def branch(runner: Runner, state: State) -> State:
 
 @app.handler
 def sdlc(runner: Runner, state: State) -> State:
-    """Full pipeline: specify → branch → implement → document."""
+    """Full pipeline: specify -> branch -> implement -> document."""
     return run_workflow(runner, state, [specify, branch, implement, document])
 ```
-
-Then trigger it and walk away:
 
 ```bash
 antkeeper run --model sonnet sdlc prompts/add-auth.md
 ```
 
-That same workflow can run from a Slack message, an HTTP webhook, or a CI job — the channel handles how input arrives and how progress is reported. The handlers just work with state.
+The same workflow runs from a Slack message, an HTTP webhook, or a CI job. The channel determines how input arrives and how progress is reported. Handlers work with state only.
 
 ### Core Concepts
 
-**State** is a plain Python dictionary (`dict[str, Any]`). Each handler receives the current state, does its work, and returns a new dict. State is automatically persisted as JSON after every step. If something fails mid-workflow, the progress so far is saved — you can see exactly where it got to and what each step produced.
+**State** is a plain Python dictionary (`dict[str, Any]`). Each handler receives the current state, does its work, and returns a new dict. State is persisted as JSON after every step. A failure mid-workflow preserves the output of all completed steps.
 
-**Handlers** are the steps in your workflow. They follow the reducer pattern: `(Runner, State) -> State`. Pure functions that take state in and return new state out, never mutating the input. Register them with `@app.handler` and they become callable by name from any channel. For the common case of "run an LLM command and extract some fields", the `cc_handler` factory builds handlers declaratively without the boilerplate.
+**Handlers** are workflow steps. They follow the reducer pattern: `(Runner, State) -> State`. Pure functions — state in, new state out, no mutation. Register with `@app.handler` to make them callable by name from any channel. For the common case of running an LLM command and extracting fields from the response, the `cc_handler` factory builds handlers declaratively.
 
-**Channels** are I/O adapters that decouple your workflow logic from how it's triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel reads @mentions in threads and replies in-thread. Your handlers don't need to know which channel is active.
+**Runner** is the execution context for a single workflow run. It binds an `App` (handler registry) to a `Channel` (I/O boundary) and manages the run lifecycle: generating a unique run ID, setting up per-run file logging, persisting state, and resolving environment variables. Handlers use the runner to communicate back to the channel (`runner.report_progress()`, `runner.report_error()`) and to signal failure (`runner.fail()`). The runner is passed to every handler but handlers do not need to manage it — it is infrastructure.
 
-**Agents** are the LLM abstraction layer. Any object with a `prompt(str) -> str` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI, but the protocol is deliberately simple so you can plug in other backends — Codex, a local model, a custom chatbot wrapper. The `cc_handler` factory is built on top of this, but you can use the `Agent` protocol directly in hand-written handlers.
+**Channels** are I/O adapters. They decouple workflow logic from how it is triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel reads @mentions in threads and replies in-thread. Handlers do not need to know which channel is active.
+
+**Agents** are the LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI, but the protocol is deliberately minimal — plug in Codex, a local model, or any other backend. The `cc_handler` factory is built on this protocol, but hand-written handlers can use it directly.
 
 ### Built-in Integrations
 
-**Git** is available out of the box because it's ubiquitous in agentic workflows. `execute()` runs arbitrary git commands, `current()` returns the branch name, `Worktree` and `git_worktree` manage isolated working directories for parallel workflows. These are provided as utilities, not as a core abstraction — the same pattern could be extended for other common tools.
+**Git** is available out of the box. `execute()` runs git commands, `current()` returns the branch name, `Worktree` and `git_worktree` manage isolated working directories. Git is ubiquitous in agentic workflows, so it ships as a utility. The same pattern could be extended for other common tools.
 
-**Slack** is a first-class channel, not an afterthought. Start the server with bot credentials and workflows are triggered by @mentions, with progress and results posted as thread replies. This matters because agentic workflows are most useful when you can fire them off and check back later.
+**Slack** is a first-class channel. Start the server with bot credentials and workflows are triggered by @mentions, with progress and results posted as thread replies.
 
 ### Two Ways to Write Handlers
 
-The **decorator pattern** gives you full control. Write a function, decorate it with `@app.handler`, and do whatever you need inside:
+The **decorator pattern** provides full control:
 
 ```python
 @app.handler
 def my_step(runner: Runner, state: State) -> State:
     runner.report_progress("doing work")
-    # ... any logic you need
     return {**state, "result": "done"}
 ```
 
-The **handler factory** (`cc_handler`) eliminates boilerplate for LLM-backed steps. Most agentic workflow steps follow the same pattern: interpolate some state into a prompt, call an LLM, maybe extract structured fields from the response. The factory encodes that pattern:
+The **handler factory** (`cc_handler`) eliminates boilerplate for LLM-backed steps. Most agentic workflow steps interpolate state into a prompt, call an LLM, and extract structured fields from the response:
 
 ```python
 specify = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
 ```
 
-This creates a handler that interpolates `$prompt` from state, runs the command, extracts `spec_file` and `slug` from the response, and merges them back into state. One line instead of fifteen.
+This creates a handler that interpolates `$prompt` from state, runs the command, extracts `spec_file` and `slug` from the response, and merges them into state.
 
-You can mix both freely. Use the factory for the common case, hand-write handlers when you need custom logic.
+Both approaches compose freely. Use the factory for the common pattern, hand-write handlers for custom logic.
 
 ## Installation
 
@@ -134,16 +133,17 @@ curl -X POST http://localhost:8000/webhook \
   -d '{"workflow_name": "sdlc", "initial_state": {"prompt": "Add user authentication", "model": "sonnet"}}'
 ```
 
-For Slack integration, set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env` file and start the server. The bot responds to @mentions in threads.
+For Slack integration, set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env` file and start the server.
 
 ## Design Principles
 
-- **State is a plain dict** — no special types, no ORM. Serialisable, inspectable, recoverable. Borrowed from Redux: predictability comes from constraints, not capability.
-- **Handlers are reducers** — `(state) -> new_state`. Pure functions, no mutation. Testable in isolation, composable in sequence.
-- **Channels separate I/O from logic** — handlers don't know whether they're running from a terminal, an API call, or a Slack message.
-- **Agent-agnostic** — the LLM layer is a protocol (`prompt(str) -> str`), not a binding to one tool. Swap backends without rewriting workflows.
-- **Composition over inheritance** — `run_workflow` folds state through a list of steps. No DAG scheduler, no base classes, no framework superclasses.
-- **Convention over configuration** — sensible defaults for log directories, state persistence, and worktree paths. Override when you need to.
+- **State is a plain dict** — `dict[str, Any]`. Serialisable, inspectable, recoverable. Predictability through constraints, not capability.
+- **Handlers are reducers** — `(Runner, State) -> State`. No mutation. Testable in isolation, composable in sequence.
+- **Runner is infrastructure** — execution context, logging, state persistence, and channel communication. Handlers receive it but do not manage it.
+- **Channels separate I/O from logic** — handlers are unaware of their trigger surface.
+- **Agent-agnostic** — the LLM layer is a protocol (`prompt(str) -> str`), not a binding to one tool.
+- **Composition over inheritance** — `run_workflow` folds state through a list of steps. No DAG scheduler, no base classes.
+- **Convention over configuration** — sensible defaults for log directories, state persistence, and worktree paths.
 
 ## Requirements
 
@@ -152,7 +152,7 @@ For Slack integration, set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env`
 
 ## Further Reading
 
-- **[Reference Guide](app_docs/reference.md)** — Detailed coverage of handlers, channels, LLM integration, git utilities, state persistence, logging, and CLI commands
+- **[Reference Guide](app_docs/reference.md)** — Handlers, channels, LLM integration, git utilities, state persistence, logging, CLI commands
 - **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence
 - **[HTTP Server](app_docs/http_server.md)** — Server architecture and endpoint design
 - **[Slack Integration](app_docs/slack.md)** — Bot configuration, event handling, thread-based replies
