@@ -2,7 +2,8 @@
 
 Covers:
     - Handler ``__name__`` / label derivation.
-    - state_updates mode: prompt wrapping, field extraction, and progress messages.
+    - state_updates mode: two-step run-then-extract pattern, field extraction,
+      and progress messages.
     - Fire-and-forget mode (no state_updates): runs command, returns state unchanged.
     - $var interpolation from state.
     - Model override: per-handler ``model`` argument takes precedence over the
@@ -50,7 +51,7 @@ def test_custom_label_overrides_default():
 
 
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"spec_file": "s.md", "slug": "foo", "extra": "ignored"})
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='{"spec_file":"s.md","slug":"foo"}')
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw response", '{"spec_file":"s.md","slug":"foo"}'])
 def test_state_updates_extracts_only_named_fields(mock_rp, mock_ej, runner_factory):
     """state_updates mode only merges fields listed in state_updates; extra fields are dropped."""
     h = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
@@ -62,20 +63,27 @@ def test_state_updates_extracts_only_named_fields(mock_rp, mock_ej, runner_facto
 
 
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"spec_file": "s.md", "slug": "foo"})
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='{}')
-def test_state_updates_uses_delegation_prompt(mock_rp, mock_ej, runner_factory):
-    """state_updates mode wraps the command in a delegation prompt containing all required fields."""
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["work output", '{"spec_file":"s.md","slug":"foo"}'])
+def test_state_updates_uses_two_step_extraction(mock_rp, mock_ej, runner_factory):
+    """state_updates mode sends raw prompt first, then extraction prompt to haiku."""
     h = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
     runner, channel = runner_factory()
     h(runner, {"prompt": "build it"})
-    call_args = mock_rp.call_args[0][0]
-    assert "run the following command using an agent" in call_args
-    assert "spec_file" in call_args
-    assert "slug" in call_args
+    assert mock_rp.call_count == 2
+    # First call: raw interpolated prompt with default model
+    first_call = mock_rp.call_args_list[0]
+    assert first_call[0][0] == "/specify build it"
+    # Second call: extraction prompt to haiku
+    second_call = mock_rp.call_args_list[1]
+    assert second_call[1]["model"] == "haiku"
+    assert "spec_file" in second_call[0][0]
+    assert "slug" in second_call[0][0]
+    assert "<response>" in second_call[0][0]
+    assert "work output" in second_call[0][0]
 
 
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"branch_name": "feat/x"})
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='{}')
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw output", '{}'])
 def test_state_updates_reports_progress(mock_rp, mock_ej, runner_factory):
     """state_updates mode emits 'Running <label>' and '<label> complete' progress messages."""
     h = cc_handler("/branch $spec_file", state_updates=["branch_name"], label="branch_if_on_main")
@@ -86,13 +94,44 @@ def test_state_updates_reports_progress(mock_rp, mock_ej, runner_factory):
 
 
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"result": "val"})
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='{}')
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw output", '{}'])
 def test_single_state_update_field(mock_rp, mock_ej, runner_factory):
     """state_updates with a single field extracts and merges it into state."""
     h = cc_handler("/cmd", state_updates=["result"])
     runner, channel = runner_factory()
     result = h(runner, {"x": 1})
     assert result == {"x": 1, "result": "val"}
+
+
+@patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"x": "val"})
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw output", '{}'])
+def test_extraction_always_uses_haiku_regardless_of_handler_model(mock_rp, mock_ej, runner_factory):
+    """Extraction step always uses 'haiku' even when handler has a different model."""
+    h = cc_handler("/cmd", state_updates=["x"], model="opus")
+    runner, channel = runner_factory()
+    h(runner, {})
+    assert mock_rp.call_count == 2
+    assert mock_rp.call_args_list[0][1]["model"] == "opus"
+    assert mock_rp.call_args_list[1][1]["model"] == "haiku"
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=AgentExecutionError("boom"))
+def test_step1_failure_skips_extraction(mock_rp, runner_factory):
+    """Step 1 failure routes through runner.fail() without calling step 2."""
+    h = cc_handler("/cmd", state_updates=["x"])
+    runner, channel = runner_factory()
+    with pytest.raises(WorkflowFailedError):
+        h(runner, {})
+    mock_rp.assert_called_once()
+
+
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["good response", AgentExecutionError("boom")])
+def test_step2_failure_calls_runner_fail(mock_rp, runner_factory):
+    """Step 2 (extraction) failure causes WorkflowFailedError."""
+    h = cc_handler("/cmd", state_updates=["x"])
+    runner, channel = runner_factory()
+    with pytest.raises(WorkflowFailedError):
+        h(runner, {})
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +263,7 @@ def test_agent_execution_error_calls_runner_fail(mock_rp, runner_factory):
         h(runner, {})
 
 
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='not json')
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw output", "not json"])
 @patch("antkeeper.handlers.claude_code.factories.extract_json", side_effect=ValueError("bad json"))
 def test_bad_json_calls_runner_fail(mock_rp, mock_ej, runner_factory):
     """ValueError from extract_json (unparseable response) causes WorkflowFailedError."""
@@ -244,7 +283,7 @@ def test_missing_state_key_calls_runner_fail(mock_rp, runner_factory):
 
 
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"other": "val"})
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='{}')
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw output", '{}'])
 def test_missing_field_in_json_response_calls_runner_fail(mock_rp, mock_ej, runner_factory):
     """A state_updates field absent from the parsed response causes WorkflowFailedError."""
     h = cc_handler("/cmd", state_updates=["expected"])

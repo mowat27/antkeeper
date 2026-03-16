@@ -5,9 +5,10 @@ The ``cc_handler`` factory eliminates boilerplate by producing
 
 * **fire-and-forget** – run the LLM command, discard the response, return
   state unchanged.
-* **delegation** – wrap the command with ``_delegation_prompt`` so a sub-agent
-  runs the command while the outer agent returns JSON.  Parse the response with
-  ``extract_json`` and merge the requested *state_updates* fields into state.
+* **extraction** – run the command first, then send the response to a fast
+  model (haiku) with ``_extraction_prompt`` to extract structured JSON fields.
+  Parse the result with ``extract_json`` and merge the requested
+  *state_updates* fields into state.
 
 An optional ``model`` argument allows overriding the LLM model on a
 per-handler basis.  When omitted, the model is read from ``state["model"]``
@@ -24,28 +25,32 @@ from antkeeper.helpers.json import extract_json
 from antkeeper.llm.claude_code import run_prompt
 from antkeeper.llm.errors import AgentExecutionError
 
+_EXTRACTION_MODEL = "haiku"
 
-def _delegation_prompt(command: str, *, required_fields: list[str]) -> str:
-    """Build a prompt that delegates the command to a sub-agent and asks the outer agent to return JSON."""
-    example = {field: f"<{field}>" for field in required_fields}
+
+def _extraction_prompt(response: str, *, required_fields: list[str]) -> str:
+    """Build a prompt instructing haiku to extract structured fields from LLM output.
+
+    Args:
+        response: The raw text output from the first ``run_prompt`` call.
+        required_fields: Names of the JSON fields to extract from *response*.
+
+    Returns:
+        A plain-text prompt that asks the model to return a JSON object
+        containing exactly the *required_fields*, with ``null`` for any field
+        not found in *response*.
+    """
     return (
-        f"Your ONLY job is to run the following command using an agent, "
-        f"then return its output as JSON. Do not read any files. "
-        f"Do not take any other actions. Do not implement anything. "
-        f"Do not attempt to fix errors or retry.\n"
+        f"Extract the following fields from the response below: "
+        f"{_json.dumps(required_fields)}\n"
         f"\n"
-        f"Command:\n"
+        f"<response>\n"
+        f"{response}\n"
+        f"</response>\n"
         f"\n"
-        f"{command}\n"
-        f"\n"
-        f"Wait for the agent to finish. Then, using ONLY the agent's output, "
-        f"return ONLY a JSON object with these fields — no other text, "
-        f"no markdown fences, no explanation:\n"
-        f"\n"
-        f"{_json.dumps(example)}\n"
-        f"\n"
-        f"Replace each placeholder with the actual value from the agent's output. "
-        f"If the agent's output does not contain a value for a field, use null."
+        f"Return ONLY a JSON object with those fields. "
+        f"No markdown fences, no explanation. "
+        f"If a field's value is not present in the response, use null."
     )
 
 
@@ -83,6 +88,33 @@ def cc_handler(
         label = command.split()[0].lstrip("/")
 
     def handler(runner: Runner, state: State) -> State:
+        """Run the Claude Code command and return updated state.
+
+        In **fire-and-forget** mode (``state_updates`` is falsy) a single
+        ``run_prompt`` call is made and *state* is returned unchanged.
+
+        In **extraction** mode (``state_updates`` is truthy) two calls are made:
+
+        1. The interpolated *command* is sent to the primary model.
+        2. ``_extraction_prompt`` wrapping the response is sent to
+           ``_EXTRACTION_MODEL`` (haiku) to obtain a structured JSON object.
+
+        The fields listed in ``state_updates`` are extracted from the parsed
+        JSON and merged into *state* before it is returned.
+
+        Args:
+            runner: Workflow runner used for progress reporting and failure signalling.
+            state: Current workflow state; ``$var`` placeholders in *command* are
+                resolved against it.
+
+        Returns:
+            Updated state dict with extracted fields merged in, or the original
+            *state* unchanged if ``state_updates`` is falsy.
+
+        Raises:
+            WorkflowFailedError: Via ``runner.fail()`` when interpolation,
+                LLM execution, JSON parsing, or field extraction fails.
+        """
         runner.report_progress(f"Running {label}")
         try:
             prompt = re.sub(
@@ -90,11 +122,15 @@ def cc_handler(
                 lambda m: str(state[m.group(1)]),
                 command,
             )
+            effective_model = model if model is not None else state.get("model")
+            response = run_prompt(prompt, runner.logger, model=effective_model)
             if state_updates:
-                prompt = _delegation_prompt(prompt, required_fields=state_updates)
-            response = run_prompt(prompt, runner.logger, model=model if model is not None else state.get("model"))
-            if state_updates:
-                parsed = extract_json(response)
+                extraction_response = run_prompt(
+                    _extraction_prompt(response, required_fields=state_updates),
+                    runner.logger,
+                    model=_EXTRACTION_MODEL,
+                )
+                parsed = extract_json(extraction_response)
                 result = {k: parsed[k] for k in state_updates}
             else:
                 result = {}

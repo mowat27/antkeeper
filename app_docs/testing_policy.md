@@ -315,42 +315,54 @@ def test_telemetry_logged_at_debug(self, caplog):
 
 Tests for the `cc_handler` factory (`tests/handlers/test_factories.py`) unit-test the factory in isolation by mocking the LLM layer.
 
-**Mock `run_prompt` at the factory module** — patch `antkeeper.handlers.claude_code.factories.run_prompt` (not the source module) to intercept LLM calls:
+**Mock `run_prompt` at the factory module** — patch `antkeeper.handlers.claude_code.factories.run_prompt` (not the source module) to intercept LLM calls. Fire-and-forget tests use a single `return_value`; extraction mode tests use `side_effect` with two values to cover both `run_prompt` calls:
 
 ```python
+# Fire-and-forget: single call
 @patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
-def test_simple_mode_merges_updates_into_state(mock_rp, runner_factory):
-    h = cc_handler("/cmd", updates={"status": "done"})
+def test_fire_and_forget_returns_state_unchanged(mock_rp, runner_factory):
+    h = cc_handler("/cmd")
     runner, channel = runner_factory()
     result = h(runner, {"x": 1})
-    assert result == {"x": 1, "status": "done"}
+    assert result == {"x": 1}
+
+# Extraction mode: two calls — Step 1 raw prompt, Step 2 extraction prompt
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw response", '{"spec_file":"s.md","slug":"foo"}'])
+def test_state_updates_extracts_fields(mock_rp, mock_ej, runner_factory):
+    ...
 ```
 
 **Use `runner_factory()` with no arguments** — factory tests do not need a custom `App`, so `runner_factory()` (no args) is idiomatic. This creates a Runner bound to the default `app` fixture.
 
-**Mock `extract_json` for JSON mode** — when testing JSON mode, also patch `antkeeper.handlers.claude_code.factories.extract_json` to control parsed output without needing valid LLM responses:
+**Mock `extract_json` for extraction mode** — when testing extraction mode, also patch `antkeeper.handlers.claude_code.factories.extract_json` to control parsed output without needing valid LLM responses:
 
 ```python
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"spec_file": "s.md", "slug": "foo", "extra": "ignored"})
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value='...')
-def test_json_mode_extracts_only_named_fields(mock_rp, mock_ej, runner_factory):
-    h = cc_handler("/specify {prompt}", json_fields=["spec_file", "slug"])
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw response", '{"spec_file":"s.md","slug":"foo"}'])
+def test_state_updates_extracts_only_named_fields(mock_rp, mock_ej, runner_factory):
+    h = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
     runner, channel = runner_factory()
     result = h(runner, {"prompt": "build something"})
     assert "extra" not in result
 ```
 
-**Validation tests need no Runner** — construction-time `ValueError` tests create the factory and assert immediately, without running the handler:
+**Assert two-call sequence for extraction mode** — verify the first `run_prompt` call receives the raw interpolated prompt with the handler's configured model, and the second call uses `"haiku"` as the model with an extraction prompt containing the required field names wrapped in `<response>` XML tags:
 
 ```python
-def test_raises_when_both_updates_and_json_fields_provided():
-    with pytest.raises(ValueError, match="exactly one"):
-        cc_handler("/cmd", updates={"a": 1}, json_fields=["a"])
+assert mock_rp.call_count == 2
+first_call = mock_rp.call_args_list[0]
+assert first_call[0][0] == "/specify build it"       # raw prompt
+second_call = mock_rp.call_args_list[1]
+assert second_call[1]["model"] == "haiku"             # always haiku
+assert "<response>" in second_call[0][0]              # XML-tagged response
+assert "spec_file" in second_call[0][0]               # required fields listed
 ```
 
-**Error handling tests expect `WorkflowFailedError`** — when `run_prompt` raises `AgentExecutionError`, or `extract_json` raises `ValueError`, or a state key is missing from the command format string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
+**Error handling tests expect `WorkflowFailedError`** — when `run_prompt` raises `AgentExecutionError` (on either Step 1 or Step 2), or `extract_json` raises `ValueError`, or a state key is missing from the command string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
 
-Tests cover: construction-time validation (both/neither args), label derivation (slash stripping, first token, explicit override), simple mode (state merge, command interpolation, progress messages), JSON mode (prompt wrapping, field extraction, progress messages), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), and edge cases (no placeholders, multiple placeholders, empty updates, single JSON field).
+**Step 1 failure skips Step 2** — use `side_effect=AgentExecutionError("boom")` (not a list) so `run_prompt` raises on the first call. Assert `mock_rp.assert_called_once()` to confirm Step 2 was never reached.
+
+Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), and error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response).
 
 ### Helper Testing Patterns
 
