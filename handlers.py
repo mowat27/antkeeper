@@ -31,8 +31,23 @@ derive_feature = cc_handler(
 # --- Steps (hand-written) ---
 @app.handler
 def branch(runner: Runner, state: State) -> State:
+    """Create a git branch for the current work item.
+
+    If ``slug`` is already present in state (e.g. set by a prior ``specify``
+    step), reports progress and checks out a new branch named after the slug.
+    Otherwise, delegates to a Claude Code handler that derives a branch name
+    from the spec file and stores it in state as ``branch_name``.
+
+    Args:
+        runner: The active workflow runner, used for progress reporting.
+        state: Current workflow state. Reads ``slug`` and ``spec_file``.
+
+    Returns:
+        Updated state with ``branch_name`` set to the checked-out branch name.
+    """
     slug = state.get('slug')
     if slug:
+        runner.report_progress(f"Using branch {slug}")
         git.execute(['checkout', '-b', slug])
         return {**state, "branch_name": slug}
 
