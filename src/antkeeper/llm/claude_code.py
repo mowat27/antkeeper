@@ -5,6 +5,7 @@ by delegating to the `claude` CLI subprocess. The agent wraps subprocess
 calls and handles command construction, error reporting, and response parsing.
 """
 
+import json
 import logging
 import subprocess
 
@@ -76,24 +77,33 @@ class ClaudeCodeAgent:
             cmd.extend(["--model", self.model])
         if self.yolo and "--dangerously-skip-permissions" not in opts_list:
             cmd.append("--dangerously-skip-permissions")
+        if not any(o.startswith("--output-format") for o in opts_list):
+            cmd.extend(["--output-format", "json"])
         cmd.extend(opts_list)
         cmd.extend(["-p", prompt])
         logger.info(f"LLM prompt submitted (length={len(prompt)} chars)")
         logger.debug(f"LLM prompt content: {prompt}")
+        logger.debug(f"LLM subprocess command: {cmd}")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
         except FileNotFoundError:
             logger.error("claude binary not found")
             raise AgentExecutionError("claude binary not found")
-        logger.debug(f"LLM subprocess command: {cmd}")
         if result.returncode != 0:
             logger.error(f"claude exited with code {result.returncode}: {result.stderr}")
             raise AgentExecutionError(
                 f"claude exited with code {result.returncode}: {result.stderr}"
             )
-        logger.info(f"LLM response received (length={len(result.stdout)} chars)")
-        logger.debug(f"LLM response content: {result.stdout}")
-        return result.stdout
+        try:
+            envelope = json.loads(result.stdout)
+            result_text = envelope["result"]
+        except (json.JSONDecodeError, KeyError) as exc:
+            raise ValueError(f"Failed to parse claude JSON output: {result.stdout!r}") from exc
+        session_id = envelope.get("session_id")
+        logger.info(f"LLM session_id: {session_id}")
+        logger.info(f"LLM response received (length={len(result_text)} chars)")
+        logger.debug(f"LLM response content: {result_text}")
+        return result_text
 
 
 def run_prompt(prompt: str, logger: logging.Logger, model: str | None = None) -> str:
