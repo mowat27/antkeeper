@@ -129,6 +129,7 @@ def cc_handler(
                     _extraction_prompt(response, required_fields=state_updates),
                     runner.logger,
                     model=_EXTRACTION_MODEL,
+                    opts=["--max-turns", "1"],
                 )
                 parsed = extract_json(extraction_response)
                 result = {k: parsed[k] for k in state_updates}

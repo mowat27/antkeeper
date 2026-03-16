@@ -28,7 +28,7 @@ def test_run_prompt_passes_model_to_agent(mock_agent_cls):
     mock_agent_cls.return_value = mock_agent
 
     run_prompt("test", logging.getLogger("test"), model="opus")
-    mock_agent_cls.assert_called_once_with(model="opus", yolo=True)
+    mock_agent_cls.assert_called_once_with(model="opus", yolo=True, opts=None)
 
 
 @patch("antkeeper.llm.claude_code.ClaudeCodeAgent")
@@ -38,4 +38,16 @@ def test_run_prompt_uses_yolo_true(mock_agent_cls):
     mock_agent_cls.return_value = mock_agent
 
     run_prompt("test", logging.getLogger("test"))
-    mock_agent_cls.assert_called_once_with(model=None, yolo=True)
+    mock_agent_cls.assert_called_once_with(model=None, yolo=True, opts=None)
+
+
+@patch("antkeeper.llm.claude_code.ClaudeCodeAgent")
+def test_run_prompt_passes_opts_to_agent(mock_agent_cls):
+    """Test that run_prompt() forwards opts to ClaudeCodeAgent."""
+    mock_agent = MagicMock()
+    mock_agent_cls.return_value = mock_agent
+
+    run_prompt("test", logging.getLogger("test"), opts=["--max-turns", "1"])
+    mock_agent_cls.assert_called_once_with(
+        model=None, yolo=True, opts=["--max-turns", "1"]
+    )
