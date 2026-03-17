@@ -14,8 +14,6 @@ from antkeeper.git.worktrees import Worktree, git_worktree
 from antkeeper.handlers.claude_code.factories import cc_handler
 from antkeeper.llm.claude_code import run_prompt
 
-app = App()
-
 
 # --- Steps (factory-built) ---
 
@@ -26,9 +24,18 @@ derive_feature = cc_handler(
     "/sdlc:derive_feature $prompt",
     state_updates=["feature_type", "slug"],
 )
+commit_push_raise_pr = cc_handler(
+    "/commit_push_raise_pr", state_updates=["pr_url"])
 
+# --- App ---
+
+app = App(handlers={
+    "commit_push_raise_pr": commit_push_raise_pr
+})
 
 # --- Steps (hand-written) ---
+
+
 @app.handler
 def branch(runner: Runner, state: State) -> State:
     """Create a git branch for the current work item.

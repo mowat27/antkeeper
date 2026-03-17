@@ -138,6 +138,7 @@ class App:
         """
         @functools.wraps(fn)
         def wrapper(runner: Runner, state: State) -> State | NoReturn:
+            """Invoke the wrapped handler, forwarding runner and state."""
             return fn(runner, state)
 
         name: str = fn.__name__  # type: ignore[attr-defined]
@@ -162,7 +163,7 @@ class App:
             raise ValueError(f"Unknown handler: {name}")
 
 
-def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, State], State]]) -> State:
+def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, State], State]], skip: int = 0) -> State:
     """Execute a sequence of workflow steps with state threading.
 
     Each step receives the runner and the current state, processes it, and
@@ -181,22 +182,41 @@ def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, Sta
     the first step has returned.  After each step completes, ``completed`` is
     incremented by 1 and the state is persisted again.
 
+    Resume support
+    --------------
+    When ``skip > 0``, the first *skip* steps are not executed and
+    ``_progress["completed"]`` starts at *skip*.  If ``skip`` is 0 and the
+    state contains ``_resume_skip``, that value is used instead.  The
+    ``_resume_skip`` key is always stripped from state before execution so it
+    is never persisted or visible to handlers.
+
     Args:
         runner: The Runner instance executing the workflow.  Used for logging
             and state persistence.
         state: The current state dictionary passed into the step sequence.
         steps: Ordered list of callables each accepting ``(runner, state)``
             and returning the updated ``State``.
+        skip: Number of leading steps to skip (default 0).  When resuming a
+            workflow, set this to the number of already-completed steps.
 
     Returns:
         The final state after all steps have been executed.
     """
+    # Consume _resume_skip from state (one-shot signal from CLI resume).
+    resume_skip = state.get("_resume_skip", 0)
+    state = {k: v for k, v in state.items() if k != "_resume_skip"}
+
+    if skip == 0 and resume_skip > 0:
+        skip = resume_skip
+
     runner.logger.info(f"run_workflow started with {len(steps)} steps: {[getattr(s, '__name__', repr(s)) for s in steps]}")
+    if skip > 0:
+        runner.logger.info(f"Resuming: skipping {skip} completed steps")
     # Initialise progress and persist immediately so the state file reflects
     # the total step count before any step begins executing.
-    state = {**state, "_progress": {"total": len(steps), "completed": 0}}
+    state = {**state, "_progress": {"total": len(steps), "completed": skip}}
     runner._persist_state(state)
-    for step in steps:
+    for step in steps[skip:]:
         step_name = getattr(step, "__name__", repr(step))
         runner.logger.info(f"Executing step: {step_name}")
         state = step(runner, state)

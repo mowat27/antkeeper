@@ -77,13 +77,25 @@ _ENV_PREFIX = "_ANTKEEPER_TEST_ENV_"
 
 
 class _SimpleChannel:
-    """Minimal channel for env var tests."""
+    """Minimal channel implementation used by env var and callable log_dir tests."""
+
     def __init__(self, workflow_name, initial_state=None):
+        """Initialise the channel with a workflow name and optional initial state.
+
+        Args:
+            workflow_name: Name of the workflow this channel represents.
+            initial_state: Optional mapping of initial state values. Defaults to
+                an empty dict when not provided.
+        """
         self.type = "test"
         self.workflow_name = workflow_name
         self.initial_state = initial_state or {}
-    def report_progress(self, run_id, message, **opts): pass
-    def report_error(self, run_id, message): pass
+
+    def report_progress(self, run_id, message, **opts):
+        """Accept a progress message; no-op for this minimal channel."""
+
+    def report_error(self, run_id, message):
+        """Accept an error message; no-op for this minimal channel."""
 
 
 def _make_env_app(**kwargs):
@@ -471,3 +483,127 @@ class TestCallableLogDir:
         channel = _SimpleChannel("noop")
         with pytest.raises(RuntimeError, match="cannot compute log dir"):
             Runner(app, channel)
+
+
+class TestWorkflowSkip:
+    """Tests for run_workflow skip / resume behaviour."""
+
+    def test_skip_skips_first_n_steps(self, app, runner_factory):
+        """skip=2 with 3 steps executes only the third step."""
+
+        def step_a(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["a"]}
+
+        def step_b(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["b"]}
+
+        def step_c(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["c"]}
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [step_a, step_b, step_c], skip=2)
+
+        runner, _ = runner_factory(app, "workflow", {})
+        result = runner.run()
+        assert result["steps"] == ["c"]
+        assert result["_progress"] == {"total": 3, "completed": 3}
+
+    def test_skip_zero_runs_all(self, app, runner_factory):
+        """skip=0 runs all steps (default behaviour)."""
+
+        def step_a(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["a"]}
+
+        def step_b(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["b"]}
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [step_a, step_b], skip=0)
+
+        runner, _ = runner_factory(app, "workflow", {})
+        result = runner.run()
+        assert result["steps"] == ["a", "b"]
+
+    def test_skip_preserves_progress_start(self, app, runner_factory):
+        """A capturing step verifies _progress['completed'] starts at skip value."""
+        captured = []
+
+        def capturing(runner, state):
+            captured.append(state["_progress"]["completed"])
+            return state
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [capturing, capturing, capturing], skip=1)
+
+        runner, _ = runner_factory(app, "workflow", {})
+        runner.run()
+        # Only steps[1:] execute, so captured sees completed=1 then completed=2
+        assert captured == [1, 2]
+
+    def test_resume_skip_in_state_auto_skips(self, app, runner_factory):
+        """_resume_skip in state causes auto-skip when skip param is 0."""
+
+        def step_a(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["a"]}
+
+        def step_b(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["b"]}
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [step_a, step_b])
+
+        runner, _ = runner_factory(app, "workflow", {"_resume_skip": 1})
+        result = runner.run()
+        assert result["steps"] == ["b"]
+        assert "_resume_skip" not in result
+
+    def test_resume_skip_consumed_after_first_call(self, app, runner_factory):
+        """_resume_skip is consumed on first run_workflow call; second call runs all."""
+
+        def step_a(runner, state):
+            return {**state, "first_steps": state.get("first_steps", []) + ["a"]}
+
+        def step_b(runner, state):
+            return {**state, "first_steps": state.get("first_steps", []) + ["b"]}
+
+        def step_x(runner, state):
+            return {**state, "second_steps": state.get("second_steps", []) + ["x"]}
+
+        def step_y(runner, state):
+            return {**state, "second_steps": state.get("second_steps", []) + ["y"]}
+
+        @app.handler
+        def workflow(runner, state):
+            state = run_workflow(runner, state, [step_a, step_b])
+            state = run_workflow(runner, state, [step_x, step_y])
+            return state
+
+        runner, _ = runner_factory(app, "workflow", {"_resume_skip": 1})
+        result = runner.run()
+        assert result["first_steps"] == ["b"]
+        assert result["second_steps"] == ["x", "y"]
+
+    def test_explicit_skip_overrides_resume_skip(self, app, runner_factory):
+        """Explicit skip=2 takes precedence over _resume_skip in state."""
+
+        def step_a(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["a"]}
+
+        def step_b(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["b"]}
+
+        def step_c(runner, state):
+            return {**state, "steps": state.get("steps", []) + ["c"]}
+
+        @app.handler
+        def workflow(runner, state):
+            return run_workflow(runner, state, [step_a, step_b, step_c], skip=2)
+
+        runner, _ = runner_factory(app, "workflow", {"_resume_skip": 1})
+        result = runner.run()
+        assert result["steps"] == ["c"]
+        assert "_resume_skip" not in result
