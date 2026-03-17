@@ -73,6 +73,7 @@ Tests mirror source layout:
 ```
 tests/
 ├── core/              # Tests for src/antkeeper/core/
+│   └── test_resume.py # _load_state_by_run_id state loading tests
 ├── channels/          # Tests for src/antkeeper/channels/
 │   └── test_slack_channel.py  # SlackChannel unit tests
 ├── handlers/          # Tests for src/antkeeper/handlers/
@@ -259,6 +260,34 @@ Tests cover:
 - `test_invalid_env_value_propagates` — An object whose `__str__` raises causes the exception to propagate; any partially-set vars are cleaned up
 - `test_run_workflow_steps_see_env_vars` — Steps inside `run_workflow()` can access env vars set at `Runner.run()` level
 - `test_env_restored_after_run_workflow_step_failure` — Env vars are cleaned up even when a step inside `run_workflow()` raises
+
+### Resume Testing Patterns
+
+Tests for workflow resume cover three distinct concerns, each in its own class or file.
+
+**`tests/core/test_resume.py`** — dedicated file for `_load_state_by_run_id` behaviour:
+
+- `TestLoadStateByRunId` — unit tests for the state-file lookup helper using `tempfile.TemporaryDirectory`. Tests cover: finding a matching file and returning its parsed dict and path, raising `FileNotFoundError` for an empty directory, and selecting the correct file when multiple state files are present.
+
+**`tests/core/test_workflows.py`** — `TestWorkflowSkip` class, alongside other workflow tests:
+
+- Tests for `run_workflow(runner, state, steps, skip=N)` cover: skipping the first N steps, running all steps when `skip=0`, verifying `_progress["completed"]` starts at the skip value, consuming `_resume_skip` from state automatically (when `skip=0`), confirming `_resume_skip` is stripped and not present in the final state, verifying sequential calls are unaffected after `_resume_skip` is consumed on the first call, and confirming an explicit `skip` parameter takes precedence over `_resume_skip` in state.
+
+**`tests/test_cli.py`** — two new classes:
+
+`TestResumeArgParsing` — argument parsing tests:
+- Parse `["resume", "abcd1234"]` → `args.run_id == "abcd1234"`, `args.command == "resume"`
+- Parse `["resume"]` → `SystemExit` (missing required positional)
+- Parse `["resume", "--agents-file", "custom.py", "abcd1234"]` → `args.agents_file == "custom.py"`
+
+`TestResumeIntegration` — end-to-end integration tests using temp agents files and temp state files:
+- Successful resume loads state, skips completed steps, and executes remaining steps
+- Unknown `run_id` → `SystemExit(1)`, stderr contains error message
+- Already-completed workflow → `SystemExit(1)`, stderr mentions "already completed"
+- State with no `_progress` → `SystemExit(1)`, stderr contains error message
+- State with no `workflow_name` → `SystemExit(1)`, stderr contains error message
+
+Resume integration tests follow the same pattern as `TestCliIntegration`: temp files, `monkeypatch.setattr("sys.argv", ...)`, `capsys` for stdout/stderr capture, and `pytest.raises(SystemExit)` for error paths.
 
 ### State Persistence Testing Patterns
 

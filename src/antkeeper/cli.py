@@ -9,6 +9,7 @@ configures initial state from command-line arguments, and executes the
 requested workflow through a CliChannel.
 """
 import argparse
+import glob as globmod
 import importlib.util
 import json
 import logging
@@ -225,6 +226,29 @@ def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict) -> None
     print(result)
 
 
+def _load_state_by_run_id(state_dir: str, run_id: str) -> tuple[dict, str]:
+    """Load persisted state for a previous run by its run_id.
+
+    Searches state_dir for a JSON file whose name ends with ``-{run_id}.json``.
+
+    Args:
+        state_dir: Directory containing persisted state files.
+        run_id: The 8-char hex identifier from a previous run.
+
+    Returns:
+        Tuple of (state dict, file path).
+
+    Raises:
+        FileNotFoundError: If no matching state file is found.
+    """
+    matches = globmod.glob(os.path.join(state_dir, f"*-{run_id}.json"))
+    if not matches:
+        raise FileNotFoundError(f"No state file found for run_id: {run_id}")
+    path = matches[0]
+    with open(path) as f:
+        return json.load(f), path
+
+
 def main() -> None:
     """Main entry point for the Antkeeper CLI.
 
@@ -259,6 +283,14 @@ def main() -> None:
             --reload: Enable auto-reload on code changes
             --agents-file: Path to Python file containing the app
                 (default: handlers.py)
+
+        resume: Resume a previously interrupted workflow run:
+            --agents-file: Path to Python file containing the app
+                (default: handlers.py)
+            run_id: The 8-character hex run identifier from the interrupted run.
+                Loads the persisted state from app.state_dir, skips already-
+                completed steps, and re-executes the remaining steps as a new
+                run.
 
         init: Scaffold a new Antkeeper project with the following options:
             path: Directory in which to create handlers.py
@@ -297,6 +329,10 @@ def main() -> None:
     server_parser.add_argument("--port", type=int, default=8000)
     server_parser.add_argument("--reload", action="store_true")
     server_parser.add_argument("--agents-file", default="handlers.py")
+
+    resume_parser = subparsers.add_parser("resume")
+    resume_parser.add_argument("--agents-file", default="handlers.py")
+    resume_parser.add_argument("run_id")
 
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("path", nargs="?", default=".")
@@ -344,6 +380,49 @@ def main() -> None:
         state["prompt"] = build_issues_prompt(issues)
         state["issue_numbers"] = args.issue_numbers
         _run_workflow_cli(args.agents_file, args.workflow_name, state)
+
+    elif args.command == "resume":
+        try:
+            app = load_app(args.agents_file)
+        except FileNotFoundError:
+            logger.error(f"Agents file not found: {args.agents_file}")
+            print(f"Error: agents file not found: {args.agents_file}", file=sys.stderr)
+            sys.exit(1)
+        except AttributeError:
+            logger.error(f"{args.agents_file} has no 'app' attribute")
+            print(f"Error: {args.agents_file} has no 'app' attribute", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            state, state_path = _load_state_by_run_id(app.state_dir, args.run_id)
+        except FileNotFoundError:
+            print(f"Error: no state found for run_id: {args.run_id}", file=sys.stderr)
+            sys.exit(1)
+
+        if "workflow_name" not in state:
+            print("Error: cannot resume: state file has no workflow_name", file=sys.stderr)
+            sys.exit(1)
+
+        if "_progress" not in state:
+            print("Error: cannot resume: workflow has no progress to resume from", file=sys.stderr)
+            sys.exit(1)
+
+        completed = state["_progress"]["completed"]
+        total = state["_progress"]["total"]
+        if completed >= total:
+            print(f"Error: cannot resume: workflow already completed ({completed}/{total} steps)", file=sys.stderr)
+            sys.exit(1)
+
+        state["_resume_skip"] = completed
+        channel = CliChannel(workflow_name=state["workflow_name"], initial_state=state)
+        runner = Runner(app, channel)
+        logger.info(f"Resuming run_id={args.run_id} as new run_id={runner.id}")
+        try:
+            result = runner.run()
+        except WorkflowFailedError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        print(result)
 
     elif args.command == "init":
         path = os.path.realpath(args.path)

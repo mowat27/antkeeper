@@ -82,6 +82,8 @@ The execution engine. Binds an `App` + `Channel`, generates a `run_id`, and driv
 
 Composition helper. Folds state through a list of handler callables, enabling composite workflows without inheritance or a DAG scheduler. Tracks progress via a `_progress` key in state.
 
+Accepts an optional `skip: int = 0` parameter. When `skip > 0`, the first *N* steps are not executed and `_progress["completed"]` starts at *N*. When `skip == 0` (the default), `run_workflow` checks state for `_resume_skip` and uses it as the skip value if present. The `_resume_skip` key is consumed on the first call and never persisted.
+
 ### Agent Protocol
 
 LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. Extension point for new LLM backends.
@@ -272,6 +274,15 @@ Execute a workflow via CLI:
 - `--initial-state key=value` — set additional state keys (repeatable)
 - Positional file args after `workflow_name` are read and concatenated into `state["prompt"]`
 - If no files provided and stdin is piped, stdin is read as the prompt
+
+### antkeeper resume
+
+Resume a partially-completed workflow run:
+- `antkeeper resume [--agents-file PATH] <run_id>` — load the persisted state for `run_id`, skip already-completed steps, and continue from the next one
+- `run_id` is the 8-character hex identifier printed by a previous `antkeeper run` invocation
+- `--agents-file` defaults to `handlers.py`
+- The resumed execution creates a **new** `run_id`, state file, and log file — the original is unchanged
+- Fails with a clear stderr message and exit 1 if: `run_id` not found, state has no `_progress`, state has no `workflow_name`, or the workflow was already completed
 
 ### antkeeper server
 

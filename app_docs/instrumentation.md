@@ -64,7 +64,7 @@ app = App()                              # defaults to ".antkeeper/state/"
 
 The `Runner` writes state to disk at four points:
 1. **Initial state creation** - After injecting `run_id` and `workflow_name` but before handler execution
-2. **Before the first workflow step** - When using `run_workflow()`, `_progress` is initialized (with `completed: 0`) and persisted immediately, before any step executes. This guarantees external consumers reading state between workflow start and first-step completion always see `_progress`.
+2. **Before the first workflow step** - When using `run_workflow()`, `_progress` is initialized and persisted immediately, before any step executes. When running fresh, `completed` starts at `0`; when resuming, it starts at the skip count. This guarantees external consumers reading state between workflow start and first-step completion always see `_progress`.
 3. **After each workflow step** - When using `run_workflow()`, state is persisted after each step completes (with `_progress.completed` incremented)
 4. **Final state** - After the handler returns successfully
 
@@ -83,6 +83,20 @@ State files contain valid JSON with `indent=2` for readability:
 ```
 
 State file stems match log file stems for correlation: `20260207143000-a1b2c3d4.json` pairs with `20260207143000-a1b2c3d4.log`.
+
+### Workflow Resume
+
+Because state is persisted after every step, a partially-completed workflow can be resumed from its last-known-good position. The `antkeeper resume <run_id>` CLI command loads the state file for a previous run, injects the `_resume_skip` signal into state, and re-executes the workflow using the original `workflow_name`.
+
+`run_workflow` consumes `_resume_skip` on first call:
+
+1. Strips `_resume_skip` from state before execution (it is never persisted and never visible to handlers).
+2. Skips the first *N* steps, where *N* is the number of already-completed steps from `_progress["completed"]`.
+3. Initialises `_progress["completed"]` to *N* rather than 0, so the progress counter accurately reflects the total steps completed across both runs.
+
+The resumed execution creates a **new** `run_id`, new state file, and new log file. The original state file is not modified. Resuming the same `run_id` multiple times is therefore safe — each creates an independent execution.
+
+Handlers require zero changes to support resume. The skip logic is entirely inside `run_workflow`.
 
 ### Error Handling
 

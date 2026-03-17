@@ -748,3 +748,189 @@ class TestFixGhIssuesIntegration:
                 assert "custom=custom_value" in captured.out
         finally:
             os.unlink(agents_path)
+
+
+class TestResumeArgParsing:
+    """Test suite for resume subcommand argument parsing."""
+
+    def _build_parser(self):
+        """Build and configure argument parser for resume subcommand testing.
+
+        Returns:
+            argparse.ArgumentParser: Configured parser with resume subcommand.
+        """
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        resume_p = sub.add_parser("resume")
+        resume_p.add_argument("--agents-file", default="handlers.py")
+        resume_p.add_argument("run_id")
+        return parser
+
+    def test_parse_resume_with_run_id(self):
+        """Test that resume command parses the positional run_id argument."""
+        args = self._build_parser().parse_args(["resume", "abcd1234"])
+        assert args.run_id == "abcd1234"
+        assert args.command == "resume"
+
+    def test_parse_resume_missing_run_id_exits(self):
+        """Test that resume command without run_id causes the parser to exit."""
+        with pytest.raises(SystemExit):
+            self._build_parser().parse_args(["resume"])
+
+    def test_parse_resume_with_agents_file(self):
+        """Test that resume command accepts a custom --agents-file path."""
+        args = self._build_parser().parse_args(["resume", "--agents-file", "custom.py", "abcd1234"])
+        assert args.agents_file == "custom.py"
+
+
+class TestResumeIntegration:
+    """Integration tests for resume subcommand."""
+
+    def _write_agents_file(self, log_dir, state_dir):
+        """Write a temp agents file with a 2-step workflow handler."""
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App, run_workflow
+            from antkeeper.core.domain import State
+
+            app = App(log_dir="{log_dir}", state_dir="{state_dir}")
+
+            def step_one(runner, state: State) -> State:
+                return {{**state, "steps": state.get("steps", []) + ["one"]}}
+
+            def step_two(runner, state: State) -> State:
+                return {{**state, "steps": state.get("steps", []) + ["two"]}}
+
+            @app.handler
+            def my_workflow(runner, state: State) -> State:
+                return run_workflow(runner, state, [step_one, step_two])
+        """)
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
+        f.write(agents_code)
+        f.flush()
+        f.close()
+        return f.name
+
+    def test_resume_loads_state_and_runs(self, monkeypatch, capsys):
+        """Resume loads state, skips completed step, runs remaining."""
+        log_dir = tempfile.mkdtemp()
+        state_dir = tempfile.mkdtemp()
+        run_id = "aabb1122"
+        state = {
+            "workflow_name": "my_workflow",
+            "run_id": run_id,
+            "_progress": {"total": 2, "completed": 1},
+        }
+        state_path = os.path.join(state_dir, f"20260316-{run_id}.json")
+        with open(state_path, "w") as f:
+            json.dump(state, f)
+
+        agents_path = self._write_agents_file(log_dir, state_dir)
+        try:
+            monkeypatch.setattr("sys.argv", [
+                "antkeeper", "resume",
+                "--agents-file", agents_path,
+                run_id,
+            ])
+            main()
+            captured = capsys.readouterr()
+            assert "two" in captured.out
+        finally:
+            os.unlink(agents_path)
+
+    def test_resume_run_id_not_found_exits(self, monkeypatch, capsys):
+        """No matching state file exits with error."""
+        log_dir = tempfile.mkdtemp()
+        state_dir = tempfile.mkdtemp()
+        agents_path = self._write_agents_file(log_dir, state_dir)
+        try:
+            monkeypatch.setattr("sys.argv", [
+                "antkeeper", "resume",
+                "--agents-file", agents_path,
+                "deadbeef",
+            ])
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+            captured = capsys.readouterr()
+            assert "no state found for run_id: deadbeef" in captured.err
+        finally:
+            os.unlink(agents_path)
+
+    def test_resume_already_completed_exits(self, monkeypatch, capsys):
+        """State with completed == total exits with error."""
+        log_dir = tempfile.mkdtemp()
+        state_dir = tempfile.mkdtemp()
+        run_id = "ccdd3344"
+        state = {
+            "workflow_name": "my_workflow",
+            "run_id": run_id,
+            "_progress": {"total": 2, "completed": 2},
+        }
+        state_path = os.path.join(state_dir, f"20260316-{run_id}.json")
+        with open(state_path, "w") as f:
+            json.dump(state, f)
+
+        agents_path = self._write_agents_file(log_dir, state_dir)
+        try:
+            monkeypatch.setattr("sys.argv", [
+                "antkeeper", "resume",
+                "--agents-file", agents_path,
+                run_id,
+            ])
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+            captured = capsys.readouterr()
+            assert "already completed" in captured.err
+        finally:
+            os.unlink(agents_path)
+
+    def test_resume_no_progress_exits(self, monkeypatch, capsys):
+        """State without _progress exits with error."""
+        log_dir = tempfile.mkdtemp()
+        state_dir = tempfile.mkdtemp()
+        run_id = "eeff5566"
+        state = {"workflow_name": "my_workflow", "run_id": run_id}
+        state_path = os.path.join(state_dir, f"20260316-{run_id}.json")
+        with open(state_path, "w") as f:
+            json.dump(state, f)
+
+        agents_path = self._write_agents_file(log_dir, state_dir)
+        try:
+            monkeypatch.setattr("sys.argv", [
+                "antkeeper", "resume",
+                "--agents-file", agents_path,
+                run_id,
+            ])
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+            captured = capsys.readouterr()
+            assert "no progress to resume from" in captured.err
+        finally:
+            os.unlink(agents_path)
+
+    def test_resume_no_workflow_name_exits(self, monkeypatch, capsys):
+        """State without workflow_name exits with error."""
+        log_dir = tempfile.mkdtemp()
+        state_dir = tempfile.mkdtemp()
+        run_id = "aabb7788"
+        state = {"run_id": run_id, "_progress": {"total": 2, "completed": 1}}
+        state_path = os.path.join(state_dir, f"20260316-{run_id}.json")
+        with open(state_path, "w") as f:
+            json.dump(state, f)
+
+        agents_path = self._write_agents_file(log_dir, state_dir)
+        try:
+            monkeypatch.setattr("sys.argv", [
+                "antkeeper", "resume",
+                "--agents-file", agents_path,
+                run_id,
+            ])
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+            captured = capsys.readouterr()
+            assert "no workflow_name" in captured.err
+        finally:
+            os.unlink(agents_path)

@@ -63,7 +63,7 @@ The same workflow runs from an HTTP webhook or a CI job. With a Slack app config
 
 ### Core Concepts
 
-**State** is a plain Python dictionary (`dict[str, Any]`). Each handler receives the current state, does its work, and returns a new dict. State is persisted as JSON after every step. A failure mid-workflow preserves the output of all completed steps.
+**State** is a plain Python dictionary (`dict[str, Any]`). Each handler receives the current state, does its work, and returns a new dict. State is persisted as JSON after every step. A failure mid-workflow preserves the output of all completed steps, and `antkeeper resume <run_id>` can restart from where it left off.
 
 **Handlers** are workflow steps. They follow the reducer pattern: `(Runner, State) -> State`. Pure functions — state in, new state out, no mutation. Register with `@app.handler` to make them callable by name from any channel. For the common case of running an LLM command and extracting fields from the response, the `cc_handler` factory builds handlers declaratively.
 
@@ -127,6 +127,9 @@ antkeeper run --model sonnet sdlc prompts/add-auth.md
 # Start the API server
 antkeeper server --host 0.0.0.0 --port 8000
 
+# Resume a partially-completed workflow (run_id shown in the original run output)
+antkeeper resume a1b2c3d4
+
 # Trigger via HTTP
 curl -X POST http://localhost:8000/webhook \
   -H "Content-Type: application/json" \
@@ -153,7 +156,7 @@ For Slack integration (requires your own Slack app), set `SLACK_BOT_TOKEN` and `
 ## Further Reading
 
 - **[Reference Guide](app_docs/reference.md)** — Handlers, channels, LLM integration, git utilities, state persistence, logging, CLI commands
-- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence
+- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence, workflow resume
 - **[HTTP Server](app_docs/http_server.md)** — Server architecture and endpoint design
 - **[Slack Integration](app_docs/slack.md)** — Bot configuration, event handling, thread-based replies
 - **[Testing Policy](app_docs/testing_policy.md)** — Test structure, fixtures, patterns
