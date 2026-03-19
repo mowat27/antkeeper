@@ -62,13 +62,14 @@ If ARGUMENTS contain "BREAKING CHANGE" (or variant), explicitly instruct the bui
 
 1. Research the codebase directly — read the relevant source files, docs, and existing patterns. You have full context capacity; there is no need to delegate research to a sub-agent.
 2. Design the solution. Write a concise internal summary of what you propose to build.
-3. Spawn these in parallel as blocking Tasks:
+3. Spawn **design-expert** as a blocking Agent (subagent_type: general-purpose) to validate architectural decisions. Pass it your design summary and ask specific questions. It should read `.claude/skills/design-expert/expertise.yaml` and answer concisely. Do NOT use the Skill tool for this — use the Agent tool so control returns here.
+4. Incorporate design-expert feedback, then spawn these in parallel as blocking Tasks:
    - **Craig** (subagent_type: general-purpose) — assesses the proposed design for unnecessary complexity and over-engineering
    - **Eduard** (subagent_type: general-purpose) — assesses the proposed design for correctness and architectural consistency
-4. Synthesize their feedback, resolve any conflicts, write the final spec.
+5. Synthesize their feedback, resolve any conflicts, write the final spec.
 
 Rules for spawning agents:
-- Pass your design summary to Craig and Eduard — do not make them re-read the codebase
+- Pass your design summary to Craig, Eduard, and design-expert — do not make them re-read the codebase
 - Instruct each to return a concise report, not raw file contents
 - Do NOT create a team. Do NOT use run_in_background. Plain blocking Task calls only.
 - As overseer, ensure: the spec meets the goals, conforms to design philosophy, no scope creep, no pre-emptive abstractions, no "just in case" changes
@@ -150,8 +151,6 @@ IMPORTANT: All checks must pass with zero errors and zero warnings. Investigate 
 
 - `app_docs/` — read everything in this directory before designing the solution
 - `README.md` — framework overview and developer documentation
-
-Use the design-expert skill proactively to validate architectural decisions before committing to them in the spec.
 
 **Finding experts:** Experts are skills already loaded into your context. Identify them by scanning the skill descriptions you already have in context — a skill is an expert if its description explicitly says so (e.g. "Design expert skill"). Include the relevant ones in the spec's `## Resources → Experts` section so the implementer knows what to use and when.
 
