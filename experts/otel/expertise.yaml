@@ -1,0 +1,262 @@
+expertise: OpenTelemetry
+custodian: otel-expert
+last_updated: "2026-03-19"
+
+overview:
+  description: >
+    OpenTelemetry is a vendor-neutral observability framework providing three
+    signals: traces, metrics, and logs.
+  components:
+    api: >
+      Cross-cutting interfaces for instrumentation. Libraries use this only,
+      never the SDK directly.
+    sdk: >
+      The implementation of the API. Configured by application owners.
+    instrumentation_libraries: >
+      Enable observability for existing libraries. Named
+      opentelemetry-instrumentation-[library].
+  context: >
+    All signals share a Context mechanism for maintaining state across
+    distributed transactions.
+
+key_packages:
+  - opentelemetry-api
+  - opentelemetry-sdk
+
+spans:
+  description: >
+    A span is the building block of a trace; represents a unit of work with
+    start and end timestamps.
+  structure:
+    - name
+    - parent_span_id: empty for root spans
+    - start_timestamp
+    - end_timestamp
+    - span_context:
+        fields:
+          - trace_id
+          - span_id
+          - trace_flags
+          - trace_state
+    - attributes
+    - events
+    - links
+    - status
+  kinds:
+    SERVER: incoming remote call
+    CLIENT: outgoing remote call
+    INTERNAL: within a single process
+    PRODUCER: async job creation
+    CONSUMER: async job processing
+  attributes:
+    description: Key-value metadata attached to a span.
+    key_type: non-null string
+    value_types:
+      - string
+      - bool
+      - number
+      - array
+    note: Semantic conventions standardise common attribute names.
+  events:
+    description: >
+      Meaningful point-in-time occurrences with timestamps. Use events when
+      timing matters; use attributes otherwise.
+  status:
+    values:
+      Unset: default; implies success
+      Ok: explicit success
+      Error: an error occurred
+  links:
+    description: >
+      Optional associations to causally related spans across traces.
+
+traces:
+  description: >
+    A trace is a set of spans organised as a directed acyclic graph with
+    parent-child relationships.
+  root_span: has no parent; all spans in the trace share the same trace ID
+  span_context: immutable; enables propagation across processes
+
+context_propagation:
+  description: >
+    Propagation moves context (trace identity, baggage) between services and
+    processes.
+  default_headers: W3C Trace Context HTTP headers (Python default)
+  propagators:
+    TraceContextTextMapPropagator:
+      inject: inject(headers, ctx)
+      extract: extract(carrier=headers)
+    W3CBaggagePropagator: handles baggage key-value metadata propagation
+  async_and_thread_boundaries:
+    preferred: use instrumentation libraries where possible; they handle this automatically
+    manual_pattern: >
+      Inject context into headers before crossing the boundary; extract on
+      the other side.
+
+python_sdk:
+  setup:
+    description: Minimal setup to configure a TracerProvider and obtain a Tracer.
+    code: |
+      from opentelemetry import trace
+      from opentelemetry.sdk.trace import TracerProvider
+      from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+      provider = TracerProvider()
+      provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+      trace.set_tracer_provider(provider)
+      tracer = trace.get_tracer("my.tracer.name")
+
+  creating_spans:
+    context_manager:
+      recommended: true
+      pattern: "with tracer.start_as_current_span(\"name\") as span:"
+    decorator:
+      pattern: "@tracer.start_as_current_span(\"name\")"
+    nested: >
+      Nest start_as_current_span calls; the inner span becomes a child of the
+      outer span.
+
+  enriching_spans:
+    attributes:
+      pattern: trace.get_current_span().set_attribute("key", "value")
+    events:
+      pattern: span.add_event("Something happened")
+    status_and_exception:
+      pattern: |
+        span.set_status(Status(StatusCode.ERROR))
+        span.record_exception(ex)
+
+sdk_internals:
+  tracer_provider:
+    owns:
+      - span processors
+      - ID generators
+      - span limits
+      - samplers
+    notes:
+      - Creates Tracer instances.
+      - Config changes apply to all already-returned Tracers.
+    methods:
+      - Shutdown()
+      - ForceFlush()
+
+  sampler:
+    method: ShouldSample()
+    return_values:
+      - DROP
+      - RECORD_ONLY
+      - RECORD_AND_SAMPLE
+    built_in_samplers:
+      - AlwaysOn
+      - AlwaysOff
+      - TraceIdRatioBased
+      - ParentBased
+      - ProbabilitySampler
+
+  span_processor:
+    on_start:
+      called: synchronously at span start
+      access: read/write
+    on_end:
+      called: after span ends
+      access: read-only
+    implementations:
+      SimpleSpanProcessor: exports immediately on end
+      BatchSpanProcessor: batches by queue size or scheduled delay; recommended for production
+
+  span_exporter:
+    export: "Export(batch): sends spans; returns Success or Failure"
+    shutdown: "Shutdown(): cleanup"
+    force_flush: "ForceFlush(): flush pending spans before returning"
+    notes:
+      - Must not block indefinitely.
+      - Retry logic is the processor's responsibility.
+
+  span_creation_flow:
+    steps:
+      - generate trace ID
+      - query sampler
+      - generate span ID
+      - create span
+      - processors
+      - exporters
+
+axiom_integration:
+  endpoints:
+    traces: https://AXIOM_DOMAIN/v1/traces
+    logs: https://AXIOM_DOMAIN/v1/logs
+    metrics: https://AXIOM_DOMAIN/v1/metrics
+  required_headers:
+    all_signals:
+      Authorization: Bearer API_TOKEN
+    traces_and_logs:
+      X-Axiom-Dataset: DATASET_NAME
+    metrics:
+      X-Axiom-Metrics-Dataset: DATASET_NAME
+  critical_rules:
+    - Each signal type MUST use a dedicated separate dataset.
+    - Metrics endpoint only supports protobuf format, not JSON.
+    - Store the API token in an environment variable, never hardcoded.
+  log_severity_fields_for_highlighting:
+    - severity
+    - severityNumber
+    - severityText
+  python_config:
+    code: |
+      from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+      exporter = OTLPSpanExporter(
+          endpoint="https://AXIOM_DOMAIN/v1/traces",
+          headers={
+              "Authorization": "Bearer API_TOKEN",
+              "X-Axiom-Dataset": "DATASET_NAME",
+          }
+      )
+
+antkeeper_implementation:
+  status: not yet implemented
+  notes:
+    - No opentelemetry imports found in src/ as of 2026-03-19.
+    - Self-improve will detect and document implementation once added.
+
+source_freshness:
+  strategy_notes:
+    conditional_get_etag: >
+      On next fetch, send If-None-Match header with stored etag. If 304
+      returned, content unchanged.
+    grep_scan: >
+      Scan the src/ directory for opentelemetry imports to detect
+      implementation.
+  sources:
+    - url: https://opentelemetry.io/docs/concepts/signals/traces/
+      etag: "50a35b30917d16588d0ee393919f37b8-ssl"
+      strategy: conditional_get_etag
+      last_fetched: "2026-03-19"
+    - url: https://opentelemetry.io/docs/specs/otel/overview/
+      etag: "a52e9e60545d129fedc89abf695da998-ssl"
+      strategy: conditional_get_etag
+      last_fetched: "2026-03-19"
+    - url: https://opentelemetry.io/docs/concepts/observability-primer/
+      etag: "1ffb7ad0a5b01c9046e2656b7d3d46c9-ssl"
+      strategy: conditional_get_etag
+      last_fetched: "2026-03-19"
+    - url: https://opentelemetry.io/docs/languages/python/instrumentation/
+      etag: "5cc2fd8345eca6c8c232faabdac67dbc-ssl"
+      strategy: conditional_get_etag
+      last_fetched: "2026-03-19"
+    - url: https://opentelemetry.io/docs/languages/python/propagation/
+      etag: "73d63d9de56a78b51afa1fd6799e146f-ssl"
+      strategy: conditional_get_etag
+      last_fetched: "2026-03-19"
+    - url: https://opentelemetry.io/docs/specs/otel/trace/sdk/
+      etag: "32a12d0f45770174c51edde3fbd383bc-ssl"
+      strategy: conditional_get_etag
+      last_fetched: "2026-03-19"
+    - url: https://axiom.co/docs/send-data/opentelemetry
+      etag: hbgyfwxr9uss9k
+      strategy: conditional_get_etag
+      last_fetched: "2026-03-19"
+    - path: src/
+      strategy: grep_scan
+      last_fetched: "2026-03-19"
+      note: no OTel implementation found
