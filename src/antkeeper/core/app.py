@@ -15,6 +15,8 @@ import os
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, NoReturn, TYPE_CHECKING
 
+from opentelemetry import trace
+
 from antkeeper.core.domain import State
 
 if TYPE_CHECKING:
@@ -216,10 +218,21 @@ def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, Sta
     # the total step count before any step begins executing.
     state = {**state, "_progress": {"total": len(steps), "completed": skip}}
     runner._persist_state(state)
-    for step in steps[skip:]:
+    tracer = trace.get_tracer("antkeeper")
+    for i, step in enumerate(steps[skip:], start=skip):
         step_name = getattr(step, "__name__", repr(step))
         runner.logger.info(f"Executing step: {step_name}")
-        state = step(runner, state)
+        with tracer.start_as_current_span(
+            "antkeeper.workflow.step",
+            attributes={
+                "run_id": state.get("run_id", ""),
+                "workflow_name": state.get("workflow_name", ""),
+                "step_name": step_name,
+                "step_index": i,
+                "step_total": len(steps),
+            },
+        ):
+            state = step(runner, state)
         progress = {**state["_progress"], "completed": state["_progress"]["completed"] + 1}
         state = {**state, "_progress": progress}
         runner._persist_state(state)
