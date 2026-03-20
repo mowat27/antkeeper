@@ -53,9 +53,10 @@ Invoke the design-expert skill before writing code if you are unsure about:
 3. Use Glob and Grep to find all source files relevant to the spec's schema changes and acceptance criteria
 4. Read those files
 5. Implement all changes
-6. Write tests
-7. Run validation commands — fix all failures before proceeding
-8. Report
+6. Update Python docstrings on any source files you changed (module, class, and function level). Do not update docstrings in test files.
+7. Write tests
+8. Run validation commands — fix all failures before proceeding
+9. Report
 
 ## Relevant Files
 
