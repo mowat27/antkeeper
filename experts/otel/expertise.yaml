@@ -1,6 +1,6 @@
 expertise: OpenTelemetry
 custodian: otel-expert
-last_updated: "2026-03-19"
+last_updated: "2026-03-20"
 
 overview:
   description: >
@@ -215,7 +215,7 @@ axiom_integration:
 
 antkeeper_implementation:
   status: "implemented"
-  last_validated: "2026-03-19"
+  last_validated: "2026-03-20"
   design_principles:
     - "No singleton/wrapper module — each call site uses trace.get_tracer('antkeeper') directly"
     - "No TracerProvider setup in library code — deployer configures via OTEL_* env vars or opentelemetry-distro"
@@ -223,18 +223,34 @@ antkeeper_implementation:
     - "Flat attribute names (run_id, session_id) not OTel semantic convention namespaces"
     - "OTel packages are core dependencies, not optional extras"
     - "Context propagation is automatic via Python contextvars (synchronous call chain)"
+    - "Cross-process propagation via opentelemetry.propagate.inject() into subprocess env"
   core_dependencies:
     - opentelemetry-api
     - opentelemetry-sdk
     - opentelemetry-exporter-otlp-proto-http
     - opentelemetry-distro
   activation:
-    method: "Standard OTEL_* environment variables"
+    method: "Wrap command with opentelemetry-instrument (from opentelemetry-distro)"
+    why: "Library code only calls trace.get_tracer('antkeeper') — no TracerProvider is configured. opentelemetry-instrument auto-configures TracerProvider, exporter, and processors from OTEL_* env vars."
+    required_env:
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: >
+        MUST be set to "http/protobuf". Without it, the auto-configurator tries
+        otlp_proto_grpc (not installed in the venv), fails silently, falls back
+        to ProxyTracerProvider (no-op), and resource attributes are lost.
     example: |
-      export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.axiom.co"
-      export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer api_xxx,X-Axiom-Dataset=antkeeper"
+      export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="https://api.axiom.co/v1/traces"
+      export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer api_xxx,X-Axiom-Dataset=antkeeper"
+      export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="http/protobuf"
       export OTEL_SERVICE_NAME="antkeeper"
-    no_op_behavior: "When OTEL_EXPORTER_OTLP_ENDPOINT is unset, OTel's built-in no-op tracer handles automatically — zero overhead"
+      opentelemetry-instrument antkeeper run --model sonnet sdlc prompts/add-auth.md
+    server_example: "opentelemetry-instrument antkeeper server --host 0.0.0.0 --port 8000"
+    no_op_behavior: "Without opentelemetry-instrument, OTEL_* env vars have no effect — get_tracer() returns the no-op tracer (zero overhead)"
+    afk_wrapper:
+      description: >
+        The afk wrapper script calls with-otel to layer Claude Code telemetry
+        config. Division of responsibility: afk owns traces (per-signal
+        OTEL_EXPORTER_OTLP_TRACES_* vars), with-otel owns logs, metrics, and
+        Claude Code telemetry.
   instrumentation_points:
     runner_run:
       file: src/antkeeper/core/runner.py
@@ -266,12 +282,23 @@ antkeeper_implementation:
       attributes_before: ["prompt_length"]
       attributes_after: ["session_id", "duration_ms", "input_tokens", "output_tokens", "total_cost_usd", "model"]
       error_handling: "Same pattern"
+      context_propagation:
+        method: "opentelemetry.propagate.inject() into env dict passed to subprocess.run(env=env)"
+        detail: >
+          Injects traceparent and tracestate into the subprocess environment so
+          Claude Code receives the current trace context. Claude Code does NOT
+          propagate traceparent into its own traces — its events remain on
+          separate traces. The session_id attribute on the antkeeper.llm.call
+          span matches attributes.session.id on Claude Code events, providing
+          a join key for cross-trace correlation.
       code_pattern: |
         with trace.get_tracer("antkeeper").start_as_current_span(
             "antkeeper.llm.call",
             attributes={"prompt_length": len(prompt)},
         ) as span:
-            # ... subprocess call ...
+            env = os.environ.copy()
+            opentelemetry.propagate.inject(env)
+            # ... subprocess.run(env=env) ...
             span.set_attribute("session_id", data.get("session_id") or "")
             span.set_attribute("duration_ms", data.get("duration_ms") or 0)
   span_hierarchy:
@@ -283,6 +310,24 @@ antkeeper_implementation:
         │    └─ antkeeper.llm.call (extraction to haiku)
         └─ antkeeper.workflow.step (step_name="implement")
              └─ antkeeper.llm.call
+  axiom_field_mapping:
+    resource_attributes: >
+      OTEL_RESOURCE_ATTRIBUTES flow through to antkeeper spans when
+      auto-configuration succeeds. In Axiom, these land in resource.custom
+      as a JSON map.
+    span_attributes: >
+      Antkeeper span attributes (run_id, session_id, etc.) land in
+      attributes.custom in Axiom.
+  cross_trace_correlation:
+    description: >
+      Claude Code does not propagate traceparent into its own traces.
+      Antkeeper and Claude Code traces are separate. The join key is
+      session_id on the antkeeper.llm.call span, which matches
+      attributes.session.id on Claude Code events in Axiom.
+    query_pattern: >
+      To correlate: find the antkeeper.llm.call span, read its session_id
+      attribute, then query Claude Code events where
+      attributes.session.id matches that value.
   testing:
     file: tests/test_tracing.py
     approach: "Test-scoped TracerProvider with _InMemoryExporter; swap trace.get_tracer_provider"
@@ -303,32 +348,32 @@ source_freshness:
     - url: https://opentelemetry.io/docs/concepts/signals/traces/
       etag: "50a35b30917d16588d0ee393919f37b8-ssl"
       strategy: conditional_get_etag
-      last_fetched: "2026-03-19"
+      last_fetched: "2026-03-20"
     - url: https://opentelemetry.io/docs/specs/otel/overview/
       etag: "a52e9e60545d129fedc89abf695da998-ssl"
       strategy: conditional_get_etag
-      last_fetched: "2026-03-19"
+      last_fetched: "2026-03-20"
     - url: https://opentelemetry.io/docs/concepts/observability-primer/
       etag: "1ffb7ad0a5b01c9046e2656b7d3d46c9-ssl"
       strategy: conditional_get_etag
-      last_fetched: "2026-03-19"
+      last_fetched: "2026-03-20"
     - url: https://opentelemetry.io/docs/languages/python/instrumentation/
       etag: "5cc2fd8345eca6c8c232faabdac67dbc-ssl"
       strategy: conditional_get_etag
-      last_fetched: "2026-03-19"
+      last_fetched: "2026-03-20"
     - url: https://opentelemetry.io/docs/languages/python/propagation/
       etag: "73d63d9de56a78b51afa1fd6799e146f-ssl"
       strategy: conditional_get_etag
-      last_fetched: "2026-03-19"
+      last_fetched: "2026-03-20"
     - url: https://opentelemetry.io/docs/specs/otel/trace/sdk/
       etag: "32a12d0f45770174c51edde3fbd383bc-ssl"
       strategy: conditional_get_etag
-      last_fetched: "2026-03-19"
+      last_fetched: "2026-03-20"
     - url: https://axiom.co/docs/send-data/opentelemetry
       etag: hbgyfwxr9uss9k
       strategy: conditional_get_etag
-      last_fetched: "2026-03-19"
+      last_fetched: "2026-03-20"
     - path: src/
       strategy: grep_scan
-      last_fetched: "2026-03-19"
-      note: OTel tracing implemented in runner.py, app.py, claude_code.py
+      last_fetched: "2026-03-20"
+      note: "OTel tracing in runner.py, app.py, claude_code.py; propagate.inject() in claude_code.py"

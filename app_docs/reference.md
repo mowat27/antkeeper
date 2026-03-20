@@ -246,7 +246,7 @@ Logs capture framework lifecycle events, handler execution, and errors. State is
 
 ### OpenTelemetry Tracing
 
-The framework emits OpenTelemetry spans at `Runner.run()` (root span), each `run_workflow()` step (child spans), and each `ClaudeCodeAgent.prompt()` call (child spans). Tracing is activated via standard `OTEL_*` environment variables — when unset, the no-op tracer is used. See [Instrumentation](instrumentation.md) for details.
+The framework emits OpenTelemetry spans at `Runner.run()` (root span), each `run_workflow()` step (child spans), and each `ClaudeCodeAgent.prompt()` call (child spans). LLM call spans also inject `traceparent` into the subprocess environment for downstream trace correlation. To export spans, wrap your command with `opentelemetry-instrument` and set `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`. Without `opentelemetry-instrument`, the no-op tracer is used. See [Instrumentation](instrumentation.md) for activation, resource attributes, querying, and design decisions.
 
 Access the logger in handlers via `runner.logger`:
 

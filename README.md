@@ -158,7 +158,7 @@ For Slack integration (requires your own Slack app), set `SLACK_BOT_TOKEN` and `
 ## Further Reading
 
 - **[Reference Guide](app_docs/reference.md)** — Handlers, channels, LLM integration, git utilities, state persistence, logging, CLI commands
-- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence, workflow resume, OpenTelemetry tracing
+- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence, workflow resume, OpenTelemetry tracing, Axiom querying
 - **[HTTP Server](app_docs/http_server.md)** — Server architecture and endpoint design
 - **[Slack Integration](app_docs/slack.md)** — Bot configuration, event handling, thread-based replies
 - **[Testing Policy](app_docs/testing_policy.md)** — Test structure, fixtures, patterns

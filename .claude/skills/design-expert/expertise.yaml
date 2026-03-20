@@ -173,7 +173,8 @@ architecture:
     (3) ClaudeCodeAgent.prompt() — child span "antkeeper.llm.call" with
     prompt_length (before), session_id/duration_ms/input_tokens/output_tokens/
     total_cost_usd/model (after). All spans record exceptions and set ERROR
-    status on failure. Activated via OTEL_* env vars; no-op tracer when unset.
+    status on failure. Activated by wrapping commands with opentelemetry-instrument
+    (e.g. opentelemetry-instrument antkeeper run ...); no-op tracer without it.
     No TracerProvider setup in library code — deployer's responsibility.
     OTel packages are core dependencies.
 

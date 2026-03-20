@@ -341,18 +341,40 @@ No automatic retry. Handlers are responsible for error handling policy.
 
 ## OpenTelemetry Tracing
 
-The framework emits OpenTelemetry spans at three instrumentation points. Tracing is activated entirely via standard OTel environment variables — when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, spans are exported; when unset, the no-op tracer is used with zero overhead.
+The framework emits OpenTelemetry spans at three instrumentation points. The library code never configures a TracerProvider — it only calls `trace.get_tracer("antkeeper")`, which returns a no-op tracer by default. To export spans, you must wrap your command with `opentelemetry-instrument` (provided by the `opentelemetry-distro` package), which auto-configures the TracerProvider, exporter, and span processors from standard `OTEL_*` environment variables.
 
 ### Activation
 
+Use `opentelemetry-instrument` to wrap the antkeeper command. You **must** set `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf` because the antkeeper venv includes only the HTTP exporter (`opentelemetry-exporter-otlp-proto-http`), not the gRPC exporter. Without this, `opentelemetry-instrument` defaults to gRPC, auto-configuration fails silently, and spans are lost.
+
 ```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.axiom.co"
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer api_xxx,X-Axiom-Dataset=antkeeper"
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="https://api.axiom.co/v1/traces"
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer api_xxx,X-Axiom-Dataset=my-dataset"
 export OTEL_SERVICE_NAME="antkeeper"
-antkeeper run --model sonnet sdlc prompts/add-auth.md
+opentelemetry-instrument antkeeper run --model sonnet sdlc prompts/add-auth.md
 ```
 
+For the HTTP server:
+
+```bash
+opentelemetry-instrument antkeeper server --host 0.0.0.0 --port 8000
+```
+
+Without `opentelemetry-instrument`, the `OTEL_*` env vars have no effect and all `get_tracer()` calls return the no-op tracer (zero overhead).
+
 No channel-specific changes are needed. All channels (CLI, API, Slack) benefit automatically because tracing is in the core execution path.
+
+### Resource Attributes
+
+Any resource attributes set via `OTEL_RESOURCE_ATTRIBUTES` by wrapper scripts are automatically included on all antkeeper spans. This is the recommended mechanism for injecting build-level, environment, or deployment metadata:
+
+```bash
+export OTEL_RESOURCE_ATTRIBUTES="build.id=abc123,build.app_name=my-app,deployment.environment=staging"
+opentelemetry-instrument antkeeper run ...
+```
+
+These attributes require successful auto-configuration — if `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is missing and auto-config falls back to the no-op tracer, resource attributes are silently dropped.
 
 ### Instrumentation Points
 
@@ -377,6 +399,12 @@ Attributes set before call: `prompt_length`
 Attributes set after successful call: `session_id`, `duration_ms`, `input_tokens`, `output_tokens`, `total_cost_usd`, `model`
 On exception: records exception on span, sets span status to ERROR, re-raises.
 
+### Context Propagation to Claude Code Subprocesses
+
+`ClaudeCodeAgent.prompt()` injects the active OTel context (W3C `traceparent` and `tracestate` headers) into the subprocess environment via `opentelemetry.propagate.inject()`. This enables Claude Code's own telemetry to be correlated with antkeeper spans.
+
+Claude Code does not currently propagate `traceparent` into its own trace hierarchy, so its events do not appear as children of `antkeeper.llm.call`. However, the `session_id` span attribute on each `antkeeper.llm.call` matches the `session.id` on Claude Code's own telemetry events, providing a reliable join key for drill-down analysis (see Querying below).
+
 ### Span Hierarchy
 
 A typical multi-step workflow produces this span tree:
@@ -391,15 +419,64 @@ antkeeper.run (run_id, workflow_name, channel.type)
        └─ antkeeper.llm.call (session_id, cost, tokens)
 ```
 
-Context propagation is automatic. Because `run_workflow` calls steps synchronously and steps call `ClaudeCodeAgent.prompt()` synchronously, Python's `contextvars`-based OTel propagation creates correct parent-child relationships with no extra wiring.
+Context propagation between antkeeper spans is automatic. Because `run_workflow` calls steps synchronously and steps call `ClaudeCodeAgent.prompt()` synchronously, Python's `contextvars`-based OTel propagation creates correct parent-child relationships with no extra wiring.
+
+### Querying in Axiom
+
+When exporting to Axiom, antkeeper span attributes land in `attributes.custom` as a JSON map, and custom resource attributes land in `resource.custom`. Axiom maps standard fields (e.g. `service.name`) to dedicated columns.
+
+**Find all antkeeper spans for a run:**
+
+```
+['my-dataset']
+| where name startswith 'antkeeper'
+| extend run_id = tostring(['attributes.custom']['run_id'])
+| where run_id == '<run_id>'
+```
+
+**Token usage by step:**
+
+```
+['my-dataset']
+| where name == 'antkeeper.llm.call'
+| where trace_id == '<trace_id>'
+| extend input_tokens = toint(['attributes.custom']['input_tokens']),
+         output_tokens = toint(['attributes.custom']['output_tokens']),
+         cost_usd = todouble(['attributes.custom']['total_cost_usd'])
+| join kind=leftouter (
+    ['my-dataset']
+    | where name == 'antkeeper.workflow.step'
+    | extend step_name = tostring(['attributes.custom']['step_name'])
+    | project span_id, step_name
+  ) on $left.parent_span_id == $right.span_id
+| summarize sum(input_tokens), sum(output_tokens), sum(cost_usd) by step_name
+```
+
+**Drill into Claude Code events for a specific LLM call (via session_id):**
+
+```
+['my-dataset']
+| where ['attributes.session.id'] == '<session_id>'
+| where ['scope.name'] == 'com.anthropic.claude_code.events'
+| summarize count() by ['attributes.tool_name']
+```
+
+**Query by resource attribute (e.g. build ID set by a wrapper script):**
+
+```
+['my-dataset']
+| extend build_id = coalesce(['resource.build.id'], tostring(['resource.custom']['build.id']))
+| where build_id == '<build_id>'
+```
 
 ### Design Decisions
 
 - **No `@traced` decorator or tracing middleware.** Instrumentation is explicit `with tracer.start_as_current_span(...)` at three specific call sites.
 - **No `TracingConfig` or configuration abstraction.** OTel's own env-var-based configuration is sufficient.
-- **No TracerProvider setup in library code.** Provider configuration is the deployer's responsibility via `OTEL_*` env vars or `opentelemetry-distro` auto-configuration.
+- **No TracerProvider setup in library code.** The library only calls `trace.get_tracer("antkeeper")`. Provider configuration is the deployer's responsibility via `opentelemetry-instrument` (which reads `OTEL_*` env vars) or programmatic setup.
 - **Flat attribute names.** Uses `run_id`, `session_id`, `input_tokens` rather than OTel semantic convention namespaces. These are domain-specific attributes.
 - **OTel packages are core dependencies.** See [standards.md](standards.md) for the rationale.
+- **Context propagation via `inject()`.** The subprocess environment carries `traceparent`/`tracestate` so that downstream tooling can link traces. Even though Claude Code does not currently honour this, the mechanism is in place for future support.
 
 ## Git Integration
 

@@ -7,9 +7,11 @@ calls and handles command construction, error reporting, and response parsing.
 
 import json
 import logging
+import os
 import subprocess
 
 from opentelemetry import trace
+from opentelemetry.propagate import inject
 
 from antkeeper.llm.errors import AgentExecutionError
 
@@ -92,9 +94,12 @@ class ClaudeCodeAgent:
             "antkeeper.llm.call",
             attributes={"prompt_length": len(prompt)},
         ) as span:
+            carrier: dict[str, str] = {}
+            inject(carrier)
+            env = {**os.environ, **carrier}
             try:
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+                    cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env
                 )
             except FileNotFoundError:
                 logger.error("claude binary not found")
