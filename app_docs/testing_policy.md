@@ -89,7 +89,8 @@ tests/
 │   ├── test_worktree.py      # Worktree class tests
 │   └── test_context.py       # git_worktree context manager tests
 ├── test_cli.py        # Tests for src/antkeeper/cli.py
-└── test_slack_server.py  # Tests for Slack event endpoint
+├── test_slack_server.py  # Tests for Slack event endpoint
+└── test_tracing.py    # Tests for OpenTelemetry tracing integration
 ```
 
 ### CLI Testing Patterns
@@ -464,6 +465,53 @@ def test_make_log_dir_uses_timestamp_at_call_time():
 ```
 
 Tests cover: timestamp format (`YYYYMMDDHHmmss`, 14 characters), `make_log_dir` returns a callable, correct path construction (base dir + timestamp + runner.id + trailing slash), and lazy timestamp evaluation.
+
+### OpenTelemetry Tracing Testing Patterns
+
+Tests for OpenTelemetry tracing (`tests/test_tracing.py`) verify that instrumentation points produce correct spans with expected attributes.
+
+**Test-scoped TracerProvider with in-memory exporter** — each test installs a test `TracerProvider` with an `_InMemoryExporter` that collects finished spans in a list. The OTel API only allows `set_tracer_provider` once per process, so the test swaps the internal getter:
+
+```python
+@pytest.fixture(autouse=True)
+def _otel_provider():
+    exporter = _InMemoryExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    original = trace.get_tracer_provider
+    trace.get_tracer_provider = lambda: provider
+    yield exporter
+    trace.get_tracer_provider = original
+    provider.shutdown()
+```
+
+Because each call site uses `trace.get_tracer("antkeeper")` directly (no singleton), installing a test provider is all that's needed — no per-module monkeypatching.
+
+**`_envelope()` helper** — builds Claude JSON envelopes with span-relevant fields (`session_id`, `duration_ms`, `usage`, `total_cost_usd`, `model`) for mock subprocess responses.
+
+Tests are organized into three classes:
+
+- **`TestRunnerRunSpan`** — verifies `Runner.run()` produces exactly one `antkeeper.run` root span with `run_id`, `workflow_name`, and `channel.type` attributes. Also verifies error recording: exceptions set span status to ERROR and record exception events while still propagating.
+
+- **`TestRunWorkflowSpans`** — verifies `run_workflow()` produces `antkeeper.workflow.step` child spans with `step_name`, `step_index`, `step_total`, `run_id`, and `workflow_name` attributes. Tests span hierarchy (step spans are children of root span), error recording on step failure, and correct span count for multi-step workflows.
+
+- **`TestLLMCallSpan`** — verifies `ClaudeCodeAgent.prompt()` produces `antkeeper.llm.call` spans with `prompt_length`, `session_id`, `duration_ms`, `input_tokens`, `output_tokens`, `total_cost_usd`, and `model` attributes. Tests error paths (non-zero exit code sets span status to ERROR and records exception).
+
+**Span assertion pattern** — filter `exporter.get_finished_spans()` by span name to find specific spans:
+
+```python
+root_spans = [s for s in exporter.get_finished_spans() if s.name == "antkeeper.run"]
+assert len(root_spans) == 1
+assert root_spans[0].attributes["run_id"] == runner.id
+```
+
+**Span hierarchy verification** — assert parent-child relationships using span context IDs:
+
+```python
+root = [s for s in exporter.get_finished_spans() if s.name == "antkeeper.run"][0]
+step = [s for s in exporter.get_finished_spans() if s.name == "antkeeper.workflow.step"][0]
+assert step.parent.span_id == root.context.span_id
+```
 
 ### Git Testing Patterns
 

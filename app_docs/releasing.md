@@ -9,13 +9,17 @@ All runtime dependencies are core — there is no split between base and optiona
 ### Core Dependencies
 
 ```toml
-dependencies = ["python-dotenv", "httpx", "fastapi", "uvicorn[standard]"]
+dependencies = ["python-dotenv", "httpx", "fastapi", "uvicorn[standard]", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "opentelemetry-distro"]
 ```
 
 - `python-dotenv` — environment variable loading
 - `httpx` — HTTP client for Slack integration
 - `fastapi` — HTTP server framework
 - `uvicorn[standard]` — ASGI server
+- `opentelemetry-api` — OpenTelemetry tracing API
+- `opentelemetry-sdk` — OpenTelemetry SDK for span processing and export
+- `opentelemetry-exporter-otlp-proto-http` — OTLP HTTP exporter (e.g. for Axiom)
+- `opentelemetry-distro` — Auto-configuration for TracerProvider via env vars
 
 ### Development Dependencies
 
@@ -23,10 +27,10 @@ Development tools (linters, type checkers, test framework) are defined in `[depe
 
 ```toml
 [dependency-groups]
-dev = ["pytest", "fastapi", "uvicorn[standard]", "ruff", "ty"]
+dev = ["pytest", "ruff", "ty"]
 ```
 
-`httpx` is now a core dependency, available in both production and dev environments.
+All runtime packages (httpx, FastAPI, uvicorn, OTel) are core dependencies, available in both production and dev environments.
 
 ## Public API
 
@@ -45,6 +49,8 @@ from antkeeper import (
     SlackChannel,
     Worktree,
     git_worktree,
+    make_log_dir,
+    make_timestamp,
 )
 ```
 
@@ -168,7 +174,7 @@ Before publishing to PyPI:
 
 1. **Update version** in `pyproject.toml`
 2. **Run quality checks**: `just` (lint + typecheck + test)
-3. **Verify imports**: `python -c "from antkeeper import App, Runner, run_workflow, CliChannel, State, Channel, WorkflowFailedError, ApiChannel, SlackChannel, Worktree, git_worktree; print('All imports OK')"`
+3. **Verify imports**: `python -c "from antkeeper import App, Runner, run_workflow, CliChannel, State, Channel, WorkflowFailedError, ApiChannel, SlackChannel, Worktree, git_worktree, make_log_dir, make_timestamp; print('All imports OK')"`
 4. **Test CLI invocation**: `python -m antkeeper` (should print help), `antkeeper init` (should scaffold handlers.py)
 5. **Build package**: `uv build`
 6. **Test installation**: `uv pip install dist/antkeeper-*.whl` in a fresh venv

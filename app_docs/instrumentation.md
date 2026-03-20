@@ -337,7 +337,69 @@ except ValueError as e:
 
 The `cc_handler` factory catches both `AgentExecutionError` and `ValueError` and routes them through `runner.fail()`.
 
-No automatic retry or telemetry. Handlers are responsible for error handling policy.
+No automatic retry. Handlers are responsible for error handling policy.
+
+## OpenTelemetry Tracing
+
+The framework emits OpenTelemetry spans at three instrumentation points. Tracing is activated entirely via standard OTel environment variables — when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, spans are exported; when unset, the no-op tracer is used with zero overhead.
+
+### Activation
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.axiom.co"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer api_xxx,X-Axiom-Dataset=antkeeper"
+export OTEL_SERVICE_NAME="antkeeper"
+antkeeper run --model sonnet sdlc prompts/add-auth.md
+```
+
+No channel-specific changes are needed. All channels (CLI, API, Slack) benefit automatically because tracing is in the core execution path.
+
+### Instrumentation Points
+
+Each call site uses `trace.get_tracer("antkeeper")` directly — no singleton wrapper or tracing module. This follows the "No Singletons" standard in [standards.md](standards.md).
+
+**1. `Runner.run()` — root span**
+
+Span name: `antkeeper.run`
+Attributes: `run_id`, `workflow_name`, `channel.type`
+On exception: records exception on span, sets span status to ERROR, re-raises.
+
+**2. `run_workflow()` — per-step child spans**
+
+Span name: `antkeeper.workflow.step`
+Attributes: `run_id`, `workflow_name`, `step_name`, `step_index`, `step_total`
+On exception: records exception on span, sets span status to ERROR, re-raises.
+
+**3. `ClaudeCodeAgent.prompt()` — per-LLM-call child spans**
+
+Span name: `antkeeper.llm.call`
+Attributes set before call: `prompt_length`
+Attributes set after successful call: `session_id`, `duration_ms`, `input_tokens`, `output_tokens`, `total_cost_usd`, `model`
+On exception: records exception on span, sets span status to ERROR, re-raises.
+
+### Span Hierarchy
+
+A typical multi-step workflow produces this span tree:
+
+```
+antkeeper.run (run_id, workflow_name, channel.type)
+  └─ antkeeper.workflow.step (step_name="specify", step_index=0)
+  │    └─ antkeeper.llm.call (session_id, cost, tokens)
+  │    └─ antkeeper.llm.call (extraction call to haiku)
+  └─ antkeeper.workflow.step (step_name="branch", step_index=1)
+  └─ antkeeper.workflow.step (step_name="implement", step_index=2)
+       └─ antkeeper.llm.call (session_id, cost, tokens)
+```
+
+Context propagation is automatic. Because `run_workflow` calls steps synchronously and steps call `ClaudeCodeAgent.prompt()` synchronously, Python's `contextvars`-based OTel propagation creates correct parent-child relationships with no extra wiring.
+
+### Design Decisions
+
+- **No `@traced` decorator or tracing middleware.** Instrumentation is explicit `with tracer.start_as_current_span(...)` at three specific call sites.
+- **No `TracingConfig` or configuration abstraction.** OTel's own env-var-based configuration is sufficient.
+- **No TracerProvider setup in library code.** Provider configuration is the deployer's responsibility via `OTEL_*` env vars or `opentelemetry-distro` auto-configuration.
+- **Flat attribute names.** Uses `run_id`, `session_id`, `input_tokens` rather than OTel semantic convention namespaces. These are domain-specific attributes.
+- **OTel packages are core dependencies.** See [standards.md](standards.md) for the rationale.
 
 ## Git Integration
 

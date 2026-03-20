@@ -214,10 +214,82 @@ axiom_integration:
       )
 
 antkeeper_implementation:
-  status: not yet implemented
-  notes:
-    - No opentelemetry imports found in src/ as of 2026-03-19.
-    - Self-improve will detect and document implementation once added.
+  status: "implemented"
+  last_validated: "2026-03-19"
+  design_principles:
+    - "No singleton/wrapper module — each call site uses trace.get_tracer('antkeeper') directly"
+    - "No TracerProvider setup in library code — deployer configures via OTEL_* env vars or opentelemetry-distro"
+    - "No @traced decorator — explicit with tracer.start_as_current_span(...) at three call sites"
+    - "Flat attribute names (run_id, session_id) not OTel semantic convention namespaces"
+    - "OTel packages are core dependencies, not optional extras"
+    - "Context propagation is automatic via Python contextvars (synchronous call chain)"
+  core_dependencies:
+    - opentelemetry-api
+    - opentelemetry-sdk
+    - opentelemetry-exporter-otlp-proto-http
+    - opentelemetry-distro
+  activation:
+    method: "Standard OTEL_* environment variables"
+    example: |
+      export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.axiom.co"
+      export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer api_xxx,X-Axiom-Dataset=antkeeper"
+      export OTEL_SERVICE_NAME="antkeeper"
+    no_op_behavior: "When OTEL_EXPORTER_OTLP_ENDPOINT is unset, OTel's built-in no-op tracer handles automatically — zero overhead"
+  instrumentation_points:
+    runner_run:
+      file: src/antkeeper/core/runner.py
+      location: "Runner.run() method"
+      span_name: "antkeeper.run"
+      attributes: ["run_id", "workflow_name", "channel.type"]
+      error_handling: "OTel context manager records exception on span and sets ERROR status; exception re-raised"
+      code_pattern: |
+        with trace.get_tracer("antkeeper").start_as_current_span(
+            "antkeeper.run",
+            attributes={"run_id": self.id, "workflow_name": self.workflow_name, "channel.type": self.channel.type},
+        ):
+    run_workflow_step:
+      file: src/antkeeper/core/app.py
+      location: "run_workflow() function, inside step loop"
+      span_name: "antkeeper.workflow.step"
+      attributes: ["run_id", "workflow_name", "step_name", "step_index", "step_total"]
+      error_handling: "Same pattern — exception recorded, ERROR status set, re-raised"
+      code_pattern: |
+        tracer = trace.get_tracer("antkeeper")
+        with tracer.start_as_current_span(
+            "antkeeper.workflow.step",
+            attributes={"step_name": step_name, "step_index": i, "step_total": len(steps), ...},
+        ):
+    llm_call:
+      file: src/antkeeper/llm/claude_code.py
+      location: "ClaudeCodeAgent.prompt() method"
+      span_name: "antkeeper.llm.call"
+      attributes_before: ["prompt_length"]
+      attributes_after: ["session_id", "duration_ms", "input_tokens", "output_tokens", "total_cost_usd", "model"]
+      error_handling: "Same pattern"
+      code_pattern: |
+        with trace.get_tracer("antkeeper").start_as_current_span(
+            "antkeeper.llm.call",
+            attributes={"prompt_length": len(prompt)},
+        ) as span:
+            # ... subprocess call ...
+            span.set_attribute("session_id", data.get("session_id") or "")
+            span.set_attribute("duration_ms", data.get("duration_ms") or 0)
+  span_hierarchy:
+    description: "Synchronous call chain creates automatic parent-child via contextvars"
+    example: |
+      antkeeper.run (root)
+        └─ antkeeper.workflow.step (step_name="specify")
+        │    └─ antkeeper.llm.call (primary prompt)
+        │    └─ antkeeper.llm.call (extraction to haiku)
+        └─ antkeeper.workflow.step (step_name="implement")
+             └─ antkeeper.llm.call
+  testing:
+    file: tests/test_tracing.py
+    approach: "Test-scoped TracerProvider with _InMemoryExporter; swap trace.get_tracer_provider"
+    test_classes:
+      - "TestRunnerRunSpan — root span existence, attributes, error recording"
+      - "TestRunWorkflowSpans — step span count, attributes, hierarchy, error recording"
+      - "TestLLMCallSpan — LLM span attributes, error recording"
 
 source_freshness:
   strategy_notes:
@@ -259,4 +331,4 @@ source_freshness:
     - path: src/
       strategy: grep_scan
       last_fetched: "2026-03-19"
-      note: no OTel implementation found
+      note: OTel tracing implemented in runner.py, app.py, claude_code.py

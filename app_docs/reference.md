@@ -30,7 +30,7 @@ src/antkeeper/
 │   ├── errors.py       # AgentExecutionError
 │   └── claude_code.py  # ClaudeCodeAgent (subprocess-based)
 ├── http/               # HTTP server layer
-│   ├── __init__.py     # FastAPI app factory
+│   ├── __init__.py     # Shared utilities: run_workflow_background()
 │   ├── webhook.py      # POST /webhook endpoint
 │   └── slack_events.py # POST /slack_event endpoint
 ├── cli.py              # Argparse-based CLI entry point
@@ -243,6 +243,10 @@ The framework creates a log file and state file for each workflow run:
 - **State file**: `{state_dir}/{timestamp}-{run_id}.json` (default: `.antkeeper/state/`)
 
 Logs capture framework lifecycle events, handler execution, and errors. State is persisted as JSON after initial creation, before the first `run_workflow()` step, after each step, and after final handler return.
+
+### OpenTelemetry Tracing
+
+The framework emits OpenTelemetry spans at `Runner.run()` (root span), each `run_workflow()` step (child spans), and each `ClaudeCodeAgent.prompt()` call (child spans). Tracing is activated via standard `OTEL_*` environment variables — when unset, the no-op tracer is used. See [Instrumentation](instrumentation.md) for details.
 
 Access the logger in handlers via `runner.logger`:
 

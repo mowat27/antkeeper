@@ -18,6 +18,8 @@ As you build with AI agents, you accumulate scripts that chain LLM calls into wo
 - **Bind to one agent** — the workflow is hardwired to one LLM tool. Switching from Claude Code to Codex or a local model means rewriting.
 - **Hide what happened** — no logging, no observability, no progress tracking. When something fails at 2am, there is no trail.
 
+Antkeeper solves all five. State is persisted after every step. Handlers are reducers with no I/O coupling. Channels decouple trigger surfaces. The LLM layer is a protocol. And every workflow run produces file-based logs and optional OpenTelemetry traces.
+
 ## How It Works
 
 Antkeeper draws on two ideas:
@@ -156,10 +158,11 @@ For Slack integration (requires your own Slack app), set `SLACK_BOT_TOKEN` and `
 ## Further Reading
 
 - **[Reference Guide](app_docs/reference.md)** — Handlers, channels, LLM integration, git utilities, state persistence, logging, CLI commands
-- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence, workflow resume
+- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence, workflow resume, OpenTelemetry tracing
 - **[HTTP Server](app_docs/http_server.md)** — Server architecture and endpoint design
 - **[Slack Integration](app_docs/slack.md)** — Bot configuration, event handling, thread-based replies
 - **[Testing Policy](app_docs/testing_policy.md)** — Test structure, fixtures, patterns
+- **[Engineering Standards](app_docs/standards.md)** — Dependency philosophy, performance, no-singletons policy
 - **[Releasing](app_docs/releasing.md)** — Packaging, dependencies, PyPI release process
 
 ## Development
