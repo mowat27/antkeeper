@@ -22,6 +22,8 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, NoReturn
 
+from opentelemetry import trace
+
 from antkeeper.core.domain import State, Channel, WorkflowFailedError
 from antkeeper.core.app import App, _app_env
 
@@ -126,17 +128,25 @@ class Runner:
 
         self.logger.info(f"Workflow started: {self.workflow_name}")
         self.logger.debug(f"Initial state: {state}")
-        try:
-            resolved_env = (
-                {k: (v(self) if callable(v) else v) for k, v in self.app.env.items()}
-                if self.app.env
-                else self.app.env
-            )
-            with _app_env(resolved_env):
-                state = self.workflow(self, state)
-        except Exception as e:
-            self.logger.error(f"Workflow failed: {self.workflow_name} - {type(e).__name__}: {e}")
-            raise
+        with trace.get_tracer("antkeeper").start_as_current_span(
+            "antkeeper.run",
+            attributes={
+                "run_id": self.id,
+                "workflow_name": self.workflow_name,
+                "channel.type": self.channel.type,
+            },
+        ):
+            try:
+                resolved_env = (
+                    {k: (v(self) if callable(v) else v) for k, v in self.app.env.items()}
+                    if self.app.env
+                    else self.app.env
+                )
+                with _app_env(resolved_env):
+                    state = self.workflow(self, state)
+            except Exception as e:
+                self.logger.error(f"Workflow failed: {self.workflow_name} - {type(e).__name__}: {e}")
+                raise
         self._persist_state(state)
         self.logger.info(f"Workflow completed: {self.workflow_name}")
         self.logger.debug(f"Final state: {state}")

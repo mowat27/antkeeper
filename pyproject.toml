@@ -12,7 +12,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Framework :: FastAPI",
 ]
-dependencies = ["python-dotenv", "httpx", "fastapi", "uvicorn[standard]"]
+dependencies = ["python-dotenv", "httpx", "fastapi", "uvicorn[standard]", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "opentelemetry-distro"]
 
 [dependency-groups]
 dev = ["pytest", "ruff", "ty"]

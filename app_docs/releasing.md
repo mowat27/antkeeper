@@ -4,32 +4,22 @@ This document covers the packaging structure, dependency management, and release
 
 ## Package Structure
 
-Antkeeper uses a split dependency model to minimize the installation footprint for users who don't need all features:
+All runtime dependencies are core — there is no split between base and optional packages. See [standards.md](standards.md) for the rationale.
 
 ### Core Dependencies
 
-The base package (`pip install antkeeper`) requires:
-- `python-dotenv` - Environment variable loading
-- `httpx` - HTTP client for Slack integration
-
-Slack functionality is first-class (not optional), ensuring reliable thread-based workflow dispatch for all users.
-
-### Optional Dependencies
-
-Server features are installed via extras:
-
-```bash
-pip install antkeeper[server]  # Adds FastAPI + uvicorn
-pip install antkeeper[all]     # Installs all extras (equivalent to [server])
-```
-
-Defined in `pyproject.toml`:
-
 ```toml
-[project.optional-dependencies]
-server = ["fastapi", "uvicorn[standard]"]
-all = ["antkeeper[server]"]
+dependencies = ["python-dotenv", "httpx", "fastapi", "uvicorn[standard]", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "opentelemetry-distro"]
 ```
+
+- `python-dotenv` — environment variable loading
+- `httpx` — HTTP client for Slack integration
+- `fastapi` — HTTP server framework
+- `uvicorn[standard]` — ASGI server
+- `opentelemetry-api` — OpenTelemetry tracing API
+- `opentelemetry-sdk` — OpenTelemetry SDK for span processing and export
+- `opentelemetry-exporter-otlp-proto-http` — OTLP HTTP exporter (e.g. for Axiom)
+- `opentelemetry-distro` — Auto-configuration for TracerProvider via env vars
 
 ### Development Dependencies
 
@@ -37,10 +27,10 @@ Development tools (linters, type checkers, test framework) are defined in `[depe
 
 ```toml
 [dependency-groups]
-dev = ["pytest", "fastapi", "uvicorn[standard]", "ruff", "ty"]
+dev = ["pytest", "ruff", "ty"]
 ```
 
-`httpx` is now a core dependency, available in both production and dev environments.
+All runtime packages (httpx, FastAPI, uvicorn, OTel) are core dependencies, available in both production and dev environments.
 
 ## Public API
 
@@ -59,10 +49,12 @@ from antkeeper import (
     SlackChannel,
     Worktree,
     git_worktree,
+    make_log_dir,
+    make_timestamp,
 )
 ```
 
-Classes that depend on optional dependencies (`ApiChannel`) are included in the public API. They import successfully (they're just class definitions), but attempting to use them without the corresponding extras installed will fail at runtime when they try to import `fastapi`. `SlackChannel` is always available since `httpx` is a core dependency.
+All channel implementations are core dependencies and always available.
 
 **Namespace policy**: The top-level `antkeeper` namespace is reserved for high-level workflow constructs (App, Runner, Channel implementations, State). Lower-level utilities are accessed via submodules:
 - Git utilities: `from antkeeper.git import execute, current, GitCommandError`
@@ -167,17 +159,13 @@ This creates wheel and source distributions in `dist/`:
 ### Installing Locally
 
 ```bash
-uv pip install .              # Core only
-uv pip install ".[server]"    # With server support
-uv pip install ".[all]"       # All extras
+uv pip install .
 ```
 
 Or using pip:
 
 ```bash
 pip install .
-pip install ".[server]"
-pip install ".[all]"
 ```
 
 ## Release Checklist
@@ -186,11 +174,11 @@ Before publishing to PyPI:
 
 1. **Update version** in `pyproject.toml`
 2. **Run quality checks**: `just` (lint + typecheck + test)
-3. **Verify imports**: `python -c "from antkeeper import App, Runner, run_workflow, CliChannel, State, Channel, WorkflowFailedError, ApiChannel, SlackChannel, Worktree, git_worktree; print('All imports OK')"`
+3. **Verify imports**: `python -c "from antkeeper import App, Runner, run_workflow, CliChannel, State, Channel, WorkflowFailedError, ApiChannel, SlackChannel, Worktree, git_worktree, make_log_dir, make_timestamp; print('All imports OK')"`
 4. **Test CLI invocation**: `python -m antkeeper` (should print help), `antkeeper init` (should scaffold handlers.py)
 5. **Build package**: `uv build`
 6. **Test installation**: `uv pip install dist/antkeeper-*.whl` in a fresh venv
-7. **Test extras**: Install with `[server]` extra, verify API server starts
+7. **Test server**: Verify API server starts
 8. **Commit and tag**: `git tag v0.1.0 && git push --tags`
 9. **Publish to PyPI**: `uv publish` (requires PyPI credentials)
 
@@ -221,10 +209,7 @@ After publishing, verify the package is installable from PyPI:
 uv venv test-env
 source test-env/bin/activate
 pip install antkeeper
-python -c "from antkeeper import App, SlackChannel; print('Core install OK')"
-
-pip install antkeeper[server]
-python -c "from antkeeper import ApiChannel; print('Server extras OK')"
+python -c "from antkeeper import App, SlackChannel, ApiChannel; print('Install OK')"
 
 # Test init subcommand
 antkeeper init test-project

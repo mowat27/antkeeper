@@ -7,7 +7,11 @@ calls and handles command construction, error reporting, and response parsing.
 
 import json
 import logging
+import os
 import subprocess
+
+from opentelemetry import trace
+from opentelemetry.propagate import inject
 
 from antkeeper.llm.errors import AgentExecutionError
 
@@ -86,39 +90,53 @@ class ClaudeCodeAgent:
         cmd.extend(["-p", prompt])
         logger.info(f"LLM prompt submitted (length={len(prompt)} chars)")
         logger.debug(f"LLM prompt content: {prompt}")
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        with trace.get_tracer("antkeeper").start_as_current_span(
+            "antkeeper.llm.call",
+            attributes={"prompt_length": len(prompt)},
+        ) as span:
+            carrier: dict[str, str] = {}
+            inject(carrier)
+            env = {**os.environ, **carrier}
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env
+                )
+            except FileNotFoundError:
+                logger.error("claude binary not found")
+                raise AgentExecutionError("claude binary not found")
+            logger.debug(f"LLM subprocess command: {cmd}")
+            if result.returncode != 0:
+                logger.error(f"claude exited with code {result.returncode}: {result.stderr}")
+                raise AgentExecutionError(
+                    f"claude exited with code {result.returncode}: {result.stderr}"
+                )
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                raise ValueError(f"Claude returned non-JSON output: {result.stdout[:200]!r}")
+            try:
+                response = data["result"]
+            except KeyError:
+                raise ValueError(
+                    f"Claude JSON envelope missing 'result' field: {result.stdout[:200]!r}"
+                )
+            span.set_attribute("session_id", data.get("session_id") or "")
+            span.set_attribute("duration_ms", data.get("duration_ms") or 0)
+            usage = data.get("usage") or {}
+            span.set_attribute("input_tokens", usage.get("input_tokens") or 0)
+            span.set_attribute("output_tokens", usage.get("output_tokens") or 0)
+            span.set_attribute("total_cost_usd", data.get("total_cost_usd") or 0.0)
+            span.set_attribute("model", data.get("model") or "")
+            logger.debug(
+                "LLM session_id=%s duration_ms=%s usage=%s cost=%s",
+                data.get("session_id"),
+                data.get("duration_ms"),
+                data.get("usage"),
+                data.get("total_cost_usd"),
             )
-        except FileNotFoundError:
-            logger.error("claude binary not found")
-            raise AgentExecutionError("claude binary not found")
-        logger.debug(f"LLM subprocess command: {cmd}")
-        if result.returncode != 0:
-            logger.error(f"claude exited with code {result.returncode}: {result.stderr}")
-            raise AgentExecutionError(
-                f"claude exited with code {result.returncode}: {result.stderr}"
-            )
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            raise ValueError(f"Claude returned non-JSON output: {result.stdout[:200]!r}")
-        try:
-            response = data["result"]
-        except KeyError:
-            raise ValueError(
-                f"Claude JSON envelope missing 'result' field: {result.stdout[:200]!r}"
-            )
-        logger.debug(
-            "LLM session_id=%s duration_ms=%s usage=%s cost=%s",
-            data.get("session_id"),
-            data.get("duration_ms"),
-            data.get("usage"),
-            data.get("total_cost_usd"),
-        )
-        logger.info(f"LLM response received (length={len(response)} chars)")
-        logger.debug(f"LLM response content: {response}")
-        return response
+            logger.info(f"LLM response received (length={len(response)} chars)")
+            logger.debug(f"LLM response content: {response}")
+            return response
 
 
 def run_prompt(

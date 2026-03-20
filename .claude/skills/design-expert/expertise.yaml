@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-16 (feature-resume-workflow)
+# Last validated: 2026-03-19 (feat/otel-support)
 
 overview:
   name: antkeeper
@@ -15,14 +15,15 @@ overview:
   entry_point: "antkeeper.cli:main"
   dependencies:
     - python-dotenv (.env file loading)
-    - httpx (Slack API calls, HTTP client — core dependency)
-  optional_dependencies:
-    server: ["fastapi", "uvicorn[standard]"]
-    all: ["antkeeper[server]"]
+    - httpx (Slack API calls, HTTP client)
+    - fastapi (HTTP server framework)
+    - uvicorn[standard] (ASGI server)
+    - opentelemetry-api (tracing API)
+    - opentelemetry-sdk (span processing and export)
+    - opentelemetry-exporter-otlp-proto-http (OTLP HTTP exporter)
+    - opentelemetry-distro (auto-configuration via env vars)
   dev_dependencies:
     - pytest (test)
-    - fastapi (web framework)
-    - uvicorn[standard] (ASGI server)
     - ruff (lint)
     - ty (type-check)
   justfile_default: "check -> ruff, ty, test"
@@ -159,9 +160,23 @@ architecture:
   logging: >
     File-based per-run logging via Python stdlib logging. Runner creates a
     per-run logger (antkeeper.run.<id>) writing to <app.log_dir>/<timestamp>-<id>.log.
-    Module-level loggers exist in cli.py, channels/cli.py, llm/claude_code.py,
-    git/worktrees.py, and git/core.py for debug tracing. No console logging
-    by default — all framework logs go to files.
+    Module-level loggers exist in cli.py, channels/cli.py, channels/slack.py,
+    llm/claude_code.py, http/slack_events.py, git/worktrees.py, and git/core.py
+    for debug tracing. No console logging by default — all framework logs go to files.
+
+  tracing: >
+    OpenTelemetry spans at three instrumentation points. Each uses
+    trace.get_tracer("antkeeper") directly (no singleton/wrapper module).
+    (1) Runner.run() — root span "antkeeper.run" with run_id, workflow_name,
+    channel.type. (2) run_workflow() — per-step child span "antkeeper.workflow.step"
+    with step_name, step_index, step_total, run_id, workflow_name.
+    (3) ClaudeCodeAgent.prompt() — child span "antkeeper.llm.call" with
+    prompt_length (before), session_id/duration_ms/input_tokens/output_tokens/
+    total_cost_usd/model (after). All spans record exceptions and set ERROR
+    status on failure. Activated by wrapping commands with opentelemetry-instrument
+    (e.g. opentelemetry-instrument antkeeper run ...); no-op tracer without it.
+    No TracerProvider setup in library code — deployer's responsibility.
+    OTel packages are core dependencies.
 
   state_persistence: >
     Automatic JSON-based state snapshots. Runner writes state to
@@ -428,10 +443,10 @@ llm_types:
 
   run_prompt:
     file: src/antkeeper/llm/claude_code.py
-    signature: "run_prompt(prompt: str, logger: logging.Logger, model: str | None = None) -> str"
+    signature: "run_prompt(prompt: str, logger: logging.Logger, model: str | None = None, opts: list[str] | None = None) -> str"
     kind: module-level convenience function
     responsibility: >
-      Creates a ClaudeCodeAgent(model=model, yolo=True), sends the prompt,
+      Creates a ClaudeCodeAgent(model=model, yolo=True, opts=opts), sends the prompt,
       returns the response string. The standard way handlers invoke the LLM
       — avoids constructing ClaudeCodeAgent directly. Not exported from
       antkeeper/__init__.py; imported directly from antkeeper.llm.claude_code.
@@ -627,11 +642,7 @@ cli_entry_point:
         - "gh command fails (CalledProcessError) -> 'Failed to fetch issue: ...' + exit(1)"
         - "Invalid gh response (JSONDecodeError) -> 'Unexpected response from `gh` CLI' + exit(1)"
         - "WorkflowFailedError -> stderr + exit(1)"
-      design_note: >
-        fetch_gh_issue uses --json number,title,body,comments,labels,state.
-        build_issues_prompt wraps each issue as '--- Issue #N ---\n<json>'.
-        Refactoring: run and fix-gh-issues share _build_common_state and
-        _run_workflow_cli helpers to reduce duplication.
+      design_note: "run and fix-gh-issues share _build_common_state and _run_workflow_cli helpers."
 
     resume:
       args:
@@ -646,9 +657,7 @@ cli_entry_point:
       error_handling:
         - "Agents file not found / no app / state file not found / no workflow_name / no _progress / already completed -> stderr + exit(1)"
         - "WorkflowFailedError -> stderr + exit(1)"
-      design_note: >
-        Resume always creates a new Runner (new run_id, new log/state files).
-        _resume_skip flows via channel.initial_state into run_workflow where it is consumed.
+      design_note: "Resume always creates a new Runner. _resume_skip flows via initial_state into run_workflow."
 
     server:
       args:
@@ -660,10 +669,7 @@ cli_entry_point:
         1. Sets ANTKEEPER_HANDLERS_FILE environment variable to args.agents_file
         2. Calls uvicorn.run("antkeeper.server:app", host, port, reload)
         3. Uvicorn imports antkeeper.server module and loads the app object
-      notes: >
-        The --agents-file is propagated to create_app() via environment variable
-        because uvicorn.run() imports the module string "antkeeper.server:app" and
-        the factory needs the path at import time.
+      notes: "--agents-file propagated via ANTKEEPER_HANDLERS_FILE env var (uvicorn imports module string)."
 
     init:
       args:
@@ -677,10 +683,7 @@ cli_entry_point:
         - "handlers.py already exists -> stderr + exit(1)"
         - "Directory does not exist (FileNotFoundError) -> stderr + exit(1)"
         - "No write permission (PermissionError) -> stderr + exit(1)"
-      template: >
-        HANDLERS_TEMPLATE is a module-level string constant in cli.py that provides
-        a starter handlers.py with: imports, App(), a healthcheck handler, and
-        commented-out examples for workflow composition and worktree isolation.
+      template: "HANDLERS_TEMPLATE module-level constant: starter handlers.py with imports, App(), healthcheck handler, commented examples."
 
   no_subcommand: "Prints help and exits 0"
 
@@ -894,6 +897,8 @@ testing_design:
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
     - tests/handlers/test_factories.py — cc_handler: label derivation, extraction mode (two-step, haiku always for extraction, step 1 failure skips step 2), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling, handler-level env (set/restore, both steps)
+    - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
+    - tests/llm/test_run_prompt.py — run_prompt convenience function: delegates to ClaudeCodeAgent, passes model/yolo/opts
 
 key_design_decisions:
   - >
