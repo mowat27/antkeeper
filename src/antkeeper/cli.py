@@ -149,6 +149,7 @@ def _load_state_by_run_id(state_dir: str, run_id: str) -> tuple[dict, str]:
 
 
 @click.group(invoke_without_command=True)
+@click.version_option(package_name="antkeeper")
 @click.pass_context
 def cli(ctx):
     """Antkeeper workflow framework CLI."""
