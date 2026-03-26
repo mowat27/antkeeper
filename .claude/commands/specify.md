@@ -49,7 +49,7 @@ When designing the solution, remember:
   - Handler errors like missing keys in state must propogate
   - Runtime issues like failed connections must propogate
   - Coding errors like naming mistakes must propogate
-  - Failed validations at the edges of the system like checking for parameters can be handled and reported to users by the framework but only when the stack trace would provide no valude
+  - Failed validations at the edges of the system like checking for parameters can be handled and reported to users by the framework but only when the stack trace would provide no value
 * Specifics must be isolated in the outer layers of the system and the core must be truly generic.  For example, a GitHub issue number or Jira Issue ID must not ever appear in the core
 * Outer layers (e.g. Channels) must depend on inner layers like `core`
 * The core of the system is a reducer pattern that allows client code to define steps in workflows.  Every step gets a context object and a `State` object and returns a new `State` that is passed to the next step.  The result of the reduction is the final state.  The state is ephemeral and never shared between workflows - this ensures thread safety in a server environment (one `App` can be used for multiple workflows) and makes it easy to reason about.
