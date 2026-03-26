@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-19 (feat/otel-support)
+# Last validated: 2026-03-25 (refactor/refactor-cli-refactor)
 
 overview:
   name: antkeeper
@@ -12,7 +12,7 @@ overview:
   python: ">=3.12"
   license: MIT
   build: uv (uv_build backend)
-  entry_point: "antkeeper.cli:main"
+  entry_point: "antkeeper.cli:main"  # Click-based CLI (Group: cli, main=cli)
   dependencies:
     - python-dotenv (.env file loading)
     - httpx (Slack API calls, HTTP client)
@@ -106,12 +106,13 @@ architecture:
     - name: helpers
       path: src/antkeeper/helpers/
       responsibility: >
-        Shared utility functions. Contains JSON extraction and
-        timestamp/log-directory helpers for handler code.
+        Shared utility functions. Contains JSON extraction, timestamp/log-directory
+        helpers, and GitHub CLI helpers for handler code.
       modules:
         - __init__.py  # Re-exports extract_json, make_timestamp, make_log_dir via __all__
         - json.py  # extract_json — finds first {…} in text, parses as JSON
         - timestamps.py  # make_timestamp — current time as YYYYMMDDHHmmss string; make_log_dir — factory returning callable (runner) -> log dir path
+        - github.py  # fetch_gh_issue, build_issues_prompt — GitHub CLI helpers (NOT re-exported from helpers/__init__.py; import directly)
 
     - name: http
       path: src/antkeeper/http/
@@ -125,19 +126,27 @@ architecture:
         - webhook.py       # handle_webhook async function, WebhookRequest/Response models
         - slack_events.py  # SlackEventProcessor class with debounce timer, pending store
 
+    - name: loader
+      path: src/antkeeper/loader.py
+      responsibility: >
+        Shared app-loading utility. load_app(path) dynamically imports a
+        Python module via importlib and returns its `app` attribute. Used by
+        both cli.py and server.py. Raises FileNotFoundError if spec is None,
+        AttributeError if module has no `app`.
+
     - name: cli
       path: src/antkeeper/cli.py
       responsibility: >
-        Argparse-based CLI entry point. Loads a user-supplied agents file
-        (Python module exporting `app`), builds a CliChannel, and runs
-        the workflow via Runner. Also provides server subcommand that starts
-        uvicorn for HTTP API access.
+        Click-based CLI entry point. Loads a user-supplied agents file
+        (Python module exporting `app`) via loader.load_app(), builds a
+        CliChannel, and runs the workflow via Runner. Also provides server
+        subcommand that starts uvicorn for HTTP API access.
 
     - name: server
       path: src/antkeeper/server.py
       responsibility: >
         FastAPI server orchestrator. Loads .env via python-dotenv, loads
-        antkeeper App from agents file, creates FastAPI instance, defines
+        antkeeper App via loader.load_app(), creates FastAPI instance, defines
         routes inline (@api.post), and delegates logic to http/webhook.py
         (handle_webhook) and http/slack_events.py (SlackEventProcessor).
         Module-level app = create_app() for uvicorn import.
@@ -256,11 +265,7 @@ core_objects:
       before the block are deleted (not set to None) on restore. Callable env values
       are already resolved by Runner.run() before _app_env is called — _app_env only
       sees plain values. Not exported from __init__.py — implementation detail.
-    behavior:
-      - "If not env: yield immediately (no-op)"
-      - "Save originals: {k: os.environ.get(k) for k in env}"
-      - "Set each: os.environ[k] = str(v) — str() failures propagate immediately"
-      - "finally: restore originals or pop if original was None"
+    behavior: "If not env: no-op. Saves originals, sets each via str(v). finally: restores or pops if original was None."
 
   Runner:
     file: src/antkeeper/core/runner.py
@@ -392,15 +397,10 @@ git_objects:
       Context manager that enters a git worktree directory. Guarantees cwd
       restoration via try/finally. Optionally creates the worktree on entry
       and removes it on exit.
-    behavior:
-      entry: >
-        If create=True, calls worktree.create(branch=branch). If create=False
-        and worktree does not exist, raises WorktreeError. Saves current cwd
-        and chdir to worktree.path.
-      exit: >
-        Restores original cwd (always, even on exception). If remove=True,
-        calls worktree.remove() after restoring cwd.
-      yields: "The Worktree instance that was entered."
+    behavior: >
+      entry: if create=True calls worktree.create(branch). If create=False and not exists, raises WorktreeError.
+      Saves cwd, chdir to worktree.path. exit: restores cwd (always). If remove=True, calls worktree.remove().
+      yields: the Worktree instance.
 
 llm_types:
   Agent:
@@ -452,6 +452,23 @@ llm_types:
       antkeeper/__init__.py; imported directly from antkeeper.llm.claude_code.
 
 helper_functions:
+  fetch_gh_issue:
+    file: src/antkeeper/helpers/github.py
+    signature: "fetch_gh_issue(issue_number: int) -> dict"
+    responsibility: >
+      Fetches a GitHub issue via gh CLI (issue view --json number,title,body,comments,labels,state).
+      Returns parsed JSON dict. Raises FileNotFoundError if gh not installed,
+      CalledProcessError on gh failure, JSONDecodeError on invalid response.
+      NOT re-exported from helpers/__init__.py; import directly.
+
+  build_issues_prompt:
+    file: src/antkeeper/helpers/github.py
+    signature: "build_issues_prompt(issues: list[dict]) -> str"
+    responsibility: >
+      Formats a list of issue dicts (from fetch_gh_issue) into a prompt string.
+      Header line + per-issue separator "--- Issue #N ---" + JSON indent=2 + trailing newlines.
+      Used by handlers that orchestrate fix-gh-issues-style workflows.
+
   extract_json:
     file: src/antkeeper/helpers/json.py
     signature: "extract_json(text: str) -> dict"
@@ -586,37 +603,29 @@ channel_implementations:
 cli_entry_point:
   file: src/antkeeper/cli.py
   shared_functions:
-    - "load_app(path: str) -> App  # dynamically imports module, extracts app attr"
     - "parse_state_pairs(pairs: list[str]) -> dict[str, str]  # splits key=val strings"
-    - "fetch_gh_issue(issue_number: int) -> dict  # calls gh issue view --json, parses JSON"
-    - "build_issues_prompt(issues: list[dict]) -> str  # formats issues into a fix prompt"
-    - "_build_common_state(args) -> dict  # parses initial_state pairs + optional model into state dict"
-    - "_run_workflow_cli(agents_file, workflow_name, state) -> None  # loads app, creates CliChannel+Runner, runs, handles errors"
+    - "_run_workflow_cli(agents_file, workflow_name, state) -> None  # calls load_app(), creates CliChannel+Runner, runs, handles errors"
     - "_load_state_by_run_id(state_dir: str, run_id: str) -> tuple[dict, str]  # globs state_dir for *-{run_id}.json, returns (state, path); raises FileNotFoundError if none"
+  note: "load_app moved to src/antkeeper/loader.py; fetch_gh_issue and build_issues_prompt moved to src/antkeeper/helpers/github.py"
   subcommands:
     run:
+      framework: Click (@cli.command)
       args:
         - "--agents-file (default: handlers.py) — path to Python module exporting `app`"
         - "--initial-state key=val (repeatable) — seed state pairs"
         - "--model — model identifier, stored as state['model']"
         - "workflow_name (positional) — workflow name to invoke"
-        - "prompt_files (positional, nargs='*') — file paths whose contents are concatenated into state['prompt']"
+        - "prompt_files (nargs=-1) — file paths whose contents are concatenated into state['prompt']"
       prompt_resolution: >
-        Positional args replace the old --prompt/--prompt-file flags.
         If prompt_files given, reads each via Path.read_text() and concatenates
         into state['prompt']. If no files and stdin is piped (!sys.stdin.isatty()),
         reads stdin into state['prompt']. If neither, no prompt is set.
       flow: >
-        1. load_app() dynamically imports the agents file via importlib
-        2. parse_state_pairs() splits key=val strings into dict
-        3. If prompt_files provided, reads and concatenates file contents into state['prompt']
-        4. Else if stdin is piped, reads stdin into state['prompt']
-        5. Merges --model into state dict if provided
-        6. Builds CliChannel with workflow_name, initial_state=dict
-        7. Creates Runner(app, channel) and calls runner.run()
-        8. Wraps runner.run() in try/except for WorkflowFailedError
-        9. On WorkflowFailedError: prints to stderr, exits 1
-        10. On success: prints result dict to stdout
+        1. parse_state_pairs() splits key=val strings into dict
+        2. If prompt_files: reads and concatenates into state['prompt']
+        3. Else if stdin piped: reads stdin into state['prompt']
+        4. Merges --model into state if provided
+        5. Delegates to _run_workflow_cli(agents_file, workflow_name, state)
       error_handling:
         - "FileNotFoundError -> agents file not found"
         - "AttributeError -> agents file has no 'app'"
@@ -624,27 +633,8 @@ cli_entry_point:
         - "Invalid state pair (no '=') -> stderr + exit(1)"
         - "WorkflowFailedError -> stderr + exit(1)"
 
-    fix-gh-issues:
-      args:
-        - "--agents-file (default: handlers.py)"
-        - "--initial-state key=val (repeatable)"
-        - "--model — stored as state['model']"
-        - "workflow_name (positional)"
-        - "issue_numbers (positional, nargs='+', type=int) — one or more GitHub issue numbers"
-      flow: >
-        1. Calls fetch_gh_issue(n) for each issue number via gh CLI
-        2. Calls _build_common_state(args) for initial_state + model
-        3. Sets state['prompt'] = build_issues_prompt(issues)
-        4. Sets state['issue_numbers'] = args.issue_numbers (list of ints)
-        5. Delegates to _run_workflow_cli(agents_file, workflow_name, state)
-      error_handling:
-        - "gh not installed (FileNotFoundError) -> '`gh` CLI not found' + exit(1)"
-        - "gh command fails (CalledProcessError) -> 'Failed to fetch issue: ...' + exit(1)"
-        - "Invalid gh response (JSONDecodeError) -> 'Unexpected response from `gh` CLI' + exit(1)"
-        - "WorkflowFailedError -> stderr + exit(1)"
-      design_note: "run and fix-gh-issues share _build_common_state and _run_workflow_cli helpers."
-
     resume:
+      framework: Click (@cli.command)
       args:
         - "--agents-file (default: handlers.py)"
         - "run_id (positional) — 8-char hex from the interrupted run"
@@ -660,6 +650,7 @@ cli_entry_point:
       design_note: "Resume always creates a new Runner. _resume_skip flows via initial_state into run_workflow."
 
     server:
+      framework: Click (@cli.command)
       args:
         - "--host (default: 127.0.0.1) — uvicorn bind host"
         - "--port (default: 8000) — uvicorn bind port"
@@ -672,6 +663,7 @@ cli_entry_point:
       notes: "--agents-file propagated via ANTKEEPER_HANDLERS_FILE env var (uvicorn imports module string)."
 
     init:
+      framework: Click (@cli.command)
       args:
         - "path (positional, optional, default: '.') — directory to create handlers.py in"
       flow: >
@@ -685,7 +677,7 @@ cli_entry_point:
         - "No write permission (PermissionError) -> stderr + exit(1)"
       template: "HANDLERS_TEMPLATE module-level constant: starter handlers.py with imports, App(), healthcheck handler, commented examples."
 
-  no_subcommand: "Prints help and exits 0"
+  no_subcommand: "Click group with invoke_without_command=True — prints help and exits 0 if no subcommand"
 
 server_module:
   file: src/antkeeper/server.py
@@ -697,7 +689,7 @@ server_module:
       signature: "create_app(agents_file: str = os.environ.get('ANTKEEPER_HANDLERS_FILE', 'handlers.py')) -> FastAPI"
       responsibility: >
         1. dotenv.load_dotenv()
-        2. load_app(agents_file) -> antkeeper App
+        2. loader.load_app(agents_file) -> antkeeper App
         3. Creates FastAPI + SlackEventProcessor(antkeeper_app)
         4. Defines @api.post("/webhook") -> delegates to handle_webhook
         5. Defines @api.post("/slack_event") -> env var guard + delegates to slack.handle_event
@@ -884,7 +876,7 @@ testing_design:
     - tests/core/test_state_persistence.py — state file creation, naming format, content, per-step persistence, log/state filename correlation
     - tests/channels/test_cli_channel.py — CliChannel initial_state and attribute tests
     - tests/channels/test_api_channel.py — ApiChannel type, initial_state, stdout/stderr reporting
-    - tests/test_cli.py — CLI arg parsing, positional prompt files, stdin prompt, WorkflowFailedError handling, integration; TestFetchGhIssue (gh subprocess, errors); TestBuildIssuesPrompt (single/multi issue format); TestFixGhIssuesArgParsing (issue_numbers nargs=+); TestFixGhIssuesIntegration (fetch+run, multi-issue, gh failure, model/initial-state merge)
+    - tests/test_cli.py — Click CLI: TestParseStatePairs (empty, valid, invalid), TestRunCommand (agent loading, prompt file/stdin, state/model), TestResumeCommand, TestServerCommand, TestInitCommand
     - tests/core/test_resume.py — TestLoadStateByRunId (finds matching file, raises FileNotFoundError when absent, picks correct file among multiple)
     - tests/test_server.py — FastAPI webhook endpoint (returns run_id, 404 for unknown workflow, 422 for invalid body)
     - tests/channels/test_slack_channel.py — SlackChannel type, initial_state, report_progress/error posts, HTTP failure resilience
@@ -899,6 +891,8 @@ testing_design:
     - tests/handlers/test_factories.py — cc_handler: label derivation, extraction mode (two-step, haiku always for extraction, step 1 failure skips step 2), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling, handler-level env (set/restore, both steps)
     - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
     - tests/llm/test_run_prompt.py — run_prompt convenience function: delegates to ClaudeCodeAgent, passes model/yolo/opts
+    - tests/core/test_loader.py — TestLoadApp: returns app object, FileNotFoundError on missing file, AttributeError on missing app attr
+    - tests/helpers/test_github.py — TestFetchGhIssue (gh subprocess, errors), TestBuildIssuesPrompt (single/multi issue format)
 
 key_design_decisions:
   - >

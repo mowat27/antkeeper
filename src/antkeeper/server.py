@@ -19,7 +19,7 @@ import os
 import dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
-from antkeeper.cli import load_app
+from antkeeper.loader import load_app
 from antkeeper.http.webhook import WebhookRequest, WebhookResponse, handle_webhook
 from antkeeper.http.slack_events import SlackEventProcessor
 

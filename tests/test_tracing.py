@@ -66,7 +66,7 @@ def _otel_provider():
 
     yield exporter
 
-    trace.get_tracer_provider = original  # type: ignore[assignment]
+    trace.get_tracer_provider = original
     provider.shutdown()
 
 

@@ -73,6 +73,7 @@ Tests mirror source layout:
 ```
 tests/
 ├── core/              # Tests for src/antkeeper/core/
+│   ├── test_loader.py # load_app() unit tests
 │   └── test_resume.py # _load_state_by_run_id state loading tests
 ├── channels/          # Tests for src/antkeeper/channels/
 │   └── test_slack_channel.py  # SlackChannel unit tests
@@ -80,6 +81,7 @@ tests/
 │   ├── test_claude_code.py    # Claude Code handler registration tests
 │   └── test_factories.py      # cc_handler factory unit tests
 ├── helpers/           # Tests for src/antkeeper/helpers/
+│   ├── test_github.py         # fetch_gh_issue() and build_issues_prompt() unit tests
 │   └── test_timestamps.py     # make_timestamp() and make_log_dir() unit tests
 ├── llm/               # Tests for src/antkeeper/llm/
 ├── git/               # Tests for src/antkeeper/git/
@@ -95,22 +97,32 @@ tests/
 
 ### CLI Testing Patterns
 
-CLI tests are split into two categories:
+CLI tests use click's `CliRunner` for end-to-end invocation without spawning a subprocess:
 
-**Argument parsing tests** (`TestArgParsing`, `TestFixGhIssuesArgParsing`) - Test argparse behavior in isolation:
-- Build a parser mirror in `_build_parser()` to avoid loading the full CLI machinery
-- The mirror must exactly match the production parser structure, including the shared parent parser pattern: create a `common = argparse.ArgumentParser(add_help=False)` with shared flags (`--agents-file`, `--initial-state`, `--model`, `workflow_name`) and pass it via `parents=[common]` to each subparser, just as `main()` does with `common_run_parent`
-- Test flag parsing, mutual exclusion, and invalid input handling
-- Use `pytest.raises(SystemExit)` for argparse error cases
+```python
+from click.testing import CliRunner
+from antkeeper.cli import cli
 
-**Integration tests** (`TestCliIntegration`) - Test end-to-end CLI execution:
-- Create temp files for handlers and input files
-- Use `monkeypatch.setattr("sys.argv", ...)` to simulate CLI invocation
-- Use `capsys` to capture stdout/stderr
-- Clean up temp files in `finally` blocks
-- Test error handling: CLI catches `WorkflowFailedError`, prints to stderr, exits with code 1
+def test_run_invokes_workflow(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["run", "healthcheck"])
+    assert result.exit_code == 0
+```
 
-For file-based inputs (e.g., positional file arguments), integration tests should write known content to a temp file and verify it flows through to the handler state.
+**Test classes** in `tests/test_cli.py`:
+- `TestParseStatePairs` — unit tests for the `parse_state_pairs()` helper (no Runner or CLI invocation)
+- `TestRunCommand` — CliRunner tests for the `run` subcommand
+- `TestInitCommand` — CliRunner tests for the `init` subcommand
+- `TestResumeCommand` — CliRunner tests for the `resume` subcommand
+
+**Key patterns:**
+- Use `CliRunner(mix_stderr=False)` when asserting on stderr separately from stdout
+- Use `runner.invoke(cli, args, input="text")` to simulate piped stdin
+- `result.exit_code` for exit status; `result.output` for stdout; `result.stderr` for stderr (when `mix_stderr=False`)
+- Create temp handler files with `tmp_path` or `tempfile`; pass via `--agents-file`
+- For error paths, assert `result.exit_code == 1` and check `result.stderr` or `result.output` for the message
+
+For file-based inputs (e.g., positional prompt file arguments), write known content to a temp file and verify it flows through to the handler state.
 
 ### API Channel Testing Patterns
 
@@ -274,21 +286,14 @@ Tests for workflow resume cover three distinct concerns, each in its own class o
 
 - Tests for `run_workflow(runner, state, steps, skip=N)` cover: skipping the first N steps, running all steps when `skip=0`, verifying `_progress["completed"]` starts at the skip value, consuming `_resume_skip` from state automatically (when `skip=0`), confirming `_resume_skip` is stripped and not present in the final state, verifying sequential calls are unaffected after `_resume_skip` is consumed on the first call, and confirming an explicit `skip` parameter takes precedence over `_resume_skip` in state.
 
-**`tests/test_cli.py`** — two new classes:
-
-`TestResumeArgParsing` — argument parsing tests:
-- Parse `["resume", "abcd1234"]` → `args.run_id == "abcd1234"`, `args.command == "resume"`
-- Parse `["resume"]` → `SystemExit` (missing required positional)
-- Parse `["resume", "--agents-file", "custom.py", "abcd1234"]` → `args.agents_file == "custom.py"`
-
-`TestResumeIntegration` — end-to-end integration tests using temp agents files and temp state files:
+**`tests/test_cli.py`** — `TestResumeCommand` class using `CliRunner`:
 - Successful resume loads state, skips completed steps, and executes remaining steps
-- Unknown `run_id` → `SystemExit(1)`, stderr contains error message
-- Already-completed workflow → `SystemExit(1)`, stderr mentions "already completed"
-- State with no `_progress` → `SystemExit(1)`, stderr contains error message
-- State with no `workflow_name` → `SystemExit(1)`, stderr contains error message
+- Unknown `run_id` → `exit_code == 1`, stderr contains error message
+- Already-completed workflow → `exit_code == 1`, stderr mentions "already completed"
+- State with no `_progress` → `exit_code == 1`, stderr contains error message
+- State with no `workflow_name` → `exit_code == 1`, stderr contains error message
 
-Resume integration tests follow the same pattern as `TestCliIntegration`: temp files, `monkeypatch.setattr("sys.argv", ...)`, `capsys` for stdout/stderr capture, and `pytest.raises(SystemExit)` for error paths.
+Resume tests use `CliRunner(mix_stderr=False)` and `runner.invoke(cli, ["resume", run_id], ...)` with temp agents files and temp state files.
 
 ### State Persistence Testing Patterns
 
@@ -418,6 +423,19 @@ For tests that verify pre-existing keys are restored (not deleted), set the key 
 Tests cover: env vars visible during execution, env restored after success, env restored after failure (WorkflowFailedError), pre-existing var overridden during execution and restored after, `env=None` is a no-op, env active during both extraction-mode `run_prompt` calls, and multiple env vars set and cleaned up together.
 
 Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), and handler-level env (set during execution, restored after success/failure, noop for None, active across both extraction calls).
+
+### GitHub Helper Testing Patterns
+
+Tests for `antkeeper.helpers.github` (`tests/helpers/test_github.py`) are pure unit tests that mock `subprocess.run` at the boundary — no real `gh` CLI invocations.
+
+- `TestFetchGhIssue` — patches `subprocess.run` to return mock JSON output; verifies `fetch_gh_issue()` calls `gh issue view` with the correct arguments and returns parsed dict
+- `TestBuildIssuesPrompt` — pure function tests requiring no mocks; verify formatted prompt structure
+
+Import pattern:
+
+```python
+from antkeeper.helpers.github import fetch_gh_issue, build_issues_prompt
+```
 
 ### Helper Testing Patterns
 
