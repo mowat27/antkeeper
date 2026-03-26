@@ -28,8 +28,9 @@ def test_single_handler(runner_factory):
 Swap channels that do I/O (stdout, stderr) with capturing doubles that collect into lists. Match the interface via duck typing (no inheritance required).
 
 **TestChannel** is the primary test double, defined in `tests/conftest.py`:
-- Captures `report_progress()` calls into `progress_messages: list[str]`
-- Captures `report_error()` calls into `error_messages: list[str]`
+- Implements `report(run_id, event: StreamEvent) -> None`
+- Captures all events to `events: list[StreamEvent]`
+- Provides backward-compatible lists: `progress_messages: list[str]` (non-error events) and `error_messages: list[str]` (error events)
 - Provides initial state without external dependencies
 
 **runner_factory** is a pytest fixture that creates `(Runner, TestChannel)` pairs for tests:
@@ -84,6 +85,9 @@ tests/
 │   ├── test_github.py         # fetch_gh_issue() and build_issues_prompt() unit tests
 │   └── test_timestamps.py     # make_timestamp() and make_log_dir() unit tests
 ├── llm/               # Tests for src/antkeeper/llm/
+│   ├── test_claude_code_agent.py  # ClaudeCodeAgent streaming tests
+│   ├── test_run_prompt.py         # run_prompt() and collect_result() tests
+│   └── test_middleware.py         # build_pipeline() and extraction middleware tests
 ├── git/               # Tests for src/antkeeper/git/
 │   ├── conftest.py    # git_repo fixture
 │   ├── test_core.py          # execute() function tests
@@ -156,7 +160,8 @@ def test_report_progress_posts_to_slack_thread(self, mock_client_cls):
     mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
 
     channel = SlackChannel("wf", slack_token="xoxb-test", channel_id="C123", thread_ts="1234.5678")
-    channel.report_progress("run1", "step done")
+    event = StreamEvent(type="progress", content="step done")
+    channel.report("run1", event)
 
     mock_client.post.assert_called_once_with(
         "https://slack.com/api/chat.postMessage",
@@ -169,17 +174,18 @@ def test_report_progress_posts_to_slack_thread(self, mock_client_cls):
 
 ```python
 @patch("antkeeper.channels.slack.httpx.Client")
-def test_report_progress_survives_http_failure(self, mock_client_cls):
+def test_report_survives_http_failure(self, mock_client_cls):
     mock_client = MagicMock()
     mock_client.post.side_effect = httpx.HTTPError("connection failed")
     mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
     mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
 
     channel = SlackChannel("wf", slack_token="xoxb-test", channel_id="C123", thread_ts="1234.5678")
-    channel.report_progress("run1", "step done")  # should not raise
+    event = StreamEvent(type="progress", content="step done")
+    channel.report("run1", event)  # should not raise
 ```
 
-Tests cover: channel type identifier, initial state handling (parametrized for None default), progress message format, error message `[ERROR]` prefix, and HTTP failure resilience.
+Tests cover: channel type identifier, initial state handling (parametrized for None default), progress event format, error event `[ERROR]` prefix, internal event suppression, and HTTP failure resilience.
 
 ### Slack Server Testing Patterns
 
@@ -314,89 +320,111 @@ Tests for state persistence (`tests/core/test_state_persistence.py`) verify:
 
 ### LLM Agent Testing Patterns
 
-Tests for `ClaudeCodeAgent` (`tests/llm/test_claude_code_agent.py`) patch `subprocess.run` at the boundary — no real subprocess invocations.
+Tests for `ClaudeCodeAgent` (`tests/llm/test_claude_code_agent.py`) patch `subprocess.Popen` at the boundary — no real subprocess invocations.
 
-**`_envelope()` helper** — a module-level helper builds valid JSON envelopes for use as mock subprocess stdout:
+**Mocking `Popen`** — create a mock with iterable `stdout` lines and a `wait()` that returns 0:
 
 ```python
-def _envelope(result="ok", session_id="s1", duration_ms=100, usage=None, total_cost_usd=0.0):
-    return json.dumps({
-        "type": "result", "subtype": "success",
-        "result": result, "session_id": session_id,
-        "duration_ms": duration_ms, "usage": usage or {},
-        "total_cost_usd": total_cost_usd,
-    })
+mock_proc = MagicMock()
+mock_proc.stdout = iter([
+    '{"type":"assistant","content":[{"type":"text","text":"hello"}]}\n',
+    '{"type":"result","result":"done","session_id":"s1","duration_ms":100,"usage":{},"total_cost_usd":0.0}\n',
+])
+mock_proc.wait.return_value = None
+mock_proc.returncode = 0
+mock_proc.poll.return_value = 0
+mock_proc.stderr = MagicMock()
 ```
 
-All tests that mock a successful subprocess response use `_envelope()` to produce the stdout value. Tests for error paths (non-zero exit, binary not found) do not need an envelope.
+All tests that mock a successful subprocess response use JSONL lines corresponding to the `--output-format stream-json` format. Tests for error paths (non-zero exit, binary not found) adjust `returncode` or raise `FileNotFoundError` from `Popen`.
 
-**`TestJsonOutputMode` test class** — groups tests for JSON envelope parsing, telemetry logging, and edge cases:
+**`test_claude_code_agent.py` key test patterns:**
 
-- `test_output_format_json_flag_always_present` / `test_output_format_not_duplicated_when_in_opts` — flag injection and deduplication
-- `test_invalid_json_raises_value_error` / `test_missing_result_key_raises_value_error` — `ValueError` paths
-- `test_telemetry_logged_at_debug` — uses `caplog.at_level(logging.DEBUG, logger="antkeeper.llm.claude_code")` to assert `session_id` and `duration_ms` values appear in debug records
-- Edge cases: `test_empty_result_string_returned`, `test_missing_session_id_does_not_raise`, `test_none_total_cost_does_not_raise`
+- `test_prompt_returns_iterator_of_stream_events` — consuming the iterator yields `StreamEvent` instances
+- `test_prompt_parses_assistant_events` — assistant JSONL lines become `type="assistant"` events
+- `test_prompt_parses_result_event` — result envelope becomes `type="result"` with metadata
+- `test_prompt_non_zero_exit_raises` — non-zero exit code raises `AgentExecutionError`
+- `test_prompt_binary_not_found` — `FileNotFoundError` from `Popen` raises `AgentExecutionError`
+- `test_prompt_malformed_jsonl_raises` — bad JSON raises `ValueError`
+- `test_output_format_stream_json_flag` — verify `--output-format stream-json` in `Popen` args
+- `test_otel_span_attributes_from_result` — span has session_id, cost, token counts from result metadata
+- `test_otel_span_closed_on_incomplete_consumption` — generator close triggers `span.end()`
+
+**`tests/llm/test_run_prompt.py`** — tests for `run_prompt()` and `collect_result()`:
+
+- `test_collect_result_returns_text_and_events` — consumes stream, returns `(text, events)`
+- `test_collect_result_empty_stream` — returns `("", [])`
+- `test_collect_result_ignores_internal_result` — only non-internal result used as text
+
+**`tests/llm/test_middleware.py`** (new file) — tests for `build_pipeline()` and extraction middleware:
+
+- `test_build_pipeline_no_middlewares` — identity pass-through
+- `test_build_pipeline_single_middleware` — transforms stream
+- `test_build_pipeline_sequential_order` — middlewares applied left-to-right
+- `test_extraction_middleware_intercepts_result` — triggers extraction on result event
+- `test_extraction_middleware_splices_internal_events` — extraction events have `internal=True`
+- `test_extraction_middleware_passes_non_result_events` — progress events unchanged
 
 **Telemetry log testing** — use pytest's built-in `caplog` fixture; no manual logger patching needed:
 
 ```python
 def test_telemetry_logged_at_debug(self, caplog):
     with caplog.at_level(logging.DEBUG, logger="antkeeper.llm.claude_code"):
-        agent.prompt("hello")
+        list(agent.prompt("hello"))  # consume iterator
     debug_text = " ".join(r.message for r in caplog.records)
-    assert "abc123" in debug_text
+    assert "s1" in debug_text
 ```
 
 ### Handler Factory Testing Patterns
 
 Tests for the `cc_handler` factory (`tests/handlers/test_factories.py`) unit-test the factory in isolation by mocking the LLM layer.
 
-**Mock `run_prompt` at the factory module** — patch `antkeeper.handlers.claude_code.factories.run_prompt` (not the source module) to intercept LLM calls. Fire-and-forget tests use a single `return_value`; extraction mode tests use `side_effect` with two values to cover both `run_prompt` calls:
+**Mock at the factory module** — the factory now creates a `ClaudeCodeAgent` directly for the primary call and uses `run_prompt` only inside the extraction middleware. Patch `antkeeper.handlers.claude_code.factories.ClaudeCodeAgent` for the primary stream and `antkeeper.handlers.claude_code.factories.run_prompt` for the extraction call. Both mocks must return iterables of `StreamEvent` instances (not strings):
 
 ```python
-# Fire-and-forget: single call
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value="ok")
-def test_fire_and_forget_returns_state_unchanged(mock_rp, runner_factory):
+from antkeeper.core.domain import StreamEvent
+
+def _make_stream(*events):
+    return iter(events)
+
+# Fire-and-forget: agent yields a single result event
+result_event = StreamEvent(type="result", content="ok")
+mock_agent = MagicMock()
+mock_agent.prompt.return_value = _make_stream(result_event)
+
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent", return_value=mock_agent)
+def test_fire_and_forget_returns_state_unchanged(mock_cls, runner_factory):
     h = cc_handler("/cmd")
     runner, channel = runner_factory()
     result = h(runner, {"x": 1})
     assert result == {"x": 1}
-
-# Extraction mode: two calls — Step 1 raw prompt, Step 2 extraction prompt
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw response", '{"spec_file":"s.md","slug":"foo"}'])
-def test_state_updates_extracts_fields(mock_rp, mock_ej, runner_factory):
-    ...
 ```
 
 **Use `runner_factory()` with no arguments** — factory tests do not need a custom `App`, so `runner_factory()` (no args) is idiomatic. This creates a Runner bound to the default `app` fixture.
 
-**Mock `extract_json` for extraction mode** — when testing extraction mode, also patch `antkeeper.handlers.claude_code.factories.extract_json` to control parsed output without needing valid LLM responses:
+**Extraction mode** — patch both `ClaudeCodeAgent` (for the primary stream) and `run_prompt` (for the extraction stream inside middleware). Also patch `extract_json` to control parsed output:
 
 ```python
 @patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"spec_file": "s.md", "slug": "foo", "extra": "ignored"})
-@patch("antkeeper.handlers.claude_code.factories.run_prompt", side_effect=["raw response", '{"spec_file":"s.md","slug":"foo"}'])
-def test_state_updates_extracts_only_named_fields(mock_rp, mock_ej, runner_factory):
+@patch("antkeeper.handlers.claude_code.factories.run_prompt", return_value=iter([StreamEvent(type="result", content='{"spec_file":"s.md","slug":"foo"}')]))
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_state_updates_extracts_only_named_fields(mock_cls, mock_rp, mock_ej, runner_factory):
+    mock_agent = MagicMock()
+    mock_agent.prompt.return_value = iter([StreamEvent(type="result", content="raw response")])
+    mock_cls.return_value = mock_agent
     h = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
     runner, channel = runner_factory()
     result = h(runner, {"prompt": "build something"})
     assert "extra" not in result
 ```
 
-**Assert two-call sequence for extraction mode** — verify the first `run_prompt` call receives the raw interpolated prompt with the handler's configured model, and the second call uses `"haiku"` as the model with an extraction prompt containing the required field names wrapped in `<response>` XML tags:
+**Events forwarded to channel** — assert that `channel.events` contains the events yielded during handler execution:
 
 ```python
-assert mock_rp.call_count == 2
-first_call = mock_rp.call_args_list[0]
-assert first_call[0][0] == "/specify build it"       # raw prompt
-second_call = mock_rp.call_args_list[1]
-assert second_call[1]["model"] == "haiku"             # always haiku
-assert "<response>" in second_call[0][0]              # XML-tagged response
-assert "spec_file" in second_call[0][0]               # required fields listed
+assert any(e.type == "result" for e in channel.events)
 ```
 
-**Error handling tests expect `WorkflowFailedError`** — when `run_prompt` raises `AgentExecutionError` (on either Step 1 or Step 2), or `extract_json` raises `ValueError`, or a state key is missing from the command string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
-
-**Step 1 failure skips Step 2** — use `side_effect=AgentExecutionError("boom")` (not a list) so `run_prompt` raises on the first call. Assert `mock_rp.assert_called_once()` to confirm Step 2 was never reached.
+**Error handling tests expect `WorkflowFailedError`** — when the agent stream raises `AgentExecutionError`, or `extract_json` raises `ValueError`, or a state key is missing from the command string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
 
 **Handler-level env tests** — use `os.environ.get()` inside a `run_prompt` `side_effect` to capture environment variable values during execution. Use prefixed keys (`_ANTKEEPER_TEST_HF_*`) to avoid collisions with real environment variables. Each test cleans up any keys it sets:
 
@@ -513,7 +541,7 @@ Tests are organized into three classes:
 
 - **`TestRunWorkflowSpans`** — verifies `run_workflow()` produces `antkeeper.workflow.step` child spans with `step_name`, `step_index`, `step_total`, `run_id`, and `workflow_name` attributes. Tests span hierarchy (step spans are children of root span), error recording on step failure, and correct span count for multi-step workflows.
 
-- **`TestLLMCallSpan`** — verifies `ClaudeCodeAgent.prompt()` produces `antkeeper.llm.call` spans with `prompt_length`, `session_id`, `duration_ms`, `input_tokens`, `output_tokens`, `total_cost_usd`, and `model` attributes. Tests error paths (non-zero exit code sets span status to ERROR and records exception).
+- **`TestLLMCallSpan`** — verifies `ClaudeCodeAgent.prompt()` produces `antkeeper.llm.call` spans with `prompt_length`, `session_id`, `duration_ms`, `input_tokens`, `output_tokens`, `total_cost_usd`, and `model` attributes. Tests error paths (non-zero exit code sets span status to ERROR and records exception). Tests generator cleanup: closing the iterator before full consumption triggers `span.end()` via the `finally` block.
 
 **Span assertion pattern** — filter `exporter.get_finished_spans()` by span name to find specific spans:
 

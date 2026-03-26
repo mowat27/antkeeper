@@ -59,7 +59,8 @@ All channel implementations are core dependencies and always available.
 
 **Namespace policy**: The top-level `antkeeper` namespace is reserved for high-level workflow constructs (App, Runner, Channel implementations, State). Lower-level utilities are accessed via submodules:
 - Git utilities: `from antkeeper.git import execute, current, GitCommandError`
-- LLM agents: `from antkeeper.llm.claude_code import ClaudeCodeAgent`
+- LLM agents: `from antkeeper.llm.claude_code import ClaudeCodeAgent, run_prompt, collect_result`
+- Domain types: `from antkeeper.core.domain import StreamEvent`
 
 This keeps the top-level API focused on the core framework concepts that most users need.
 

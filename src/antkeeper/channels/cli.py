@@ -6,9 +6,8 @@ reporting to stdout and error reporting to stderr.
 """
 import logging
 import sys
-from typing import Any
 
-from antkeeper.core.domain import State
+from antkeeper.core.domain import State, StreamEvent
 
 logger = logging.getLogger("antkeeper.channels.cli")
 
@@ -39,24 +38,18 @@ class CliChannel:
         self.initial_state: State = {**(initial_state or {})}
         logger.debug(f"CliChannel initialized: workflow_name={workflow_name}")
 
-    def report_progress(self, run_id: str, message: str, **opts: Any) -> None:
-        """Report workflow progress to stdout.
+    def report(self, run_id: str, event: StreamEvent) -> None:
+        """Report a workflow event to stdout/stderr.
 
         Args:
             run_id: Unique identifier for the workflow run.
-            message: Progress message to display.
-            **opts: Additional keyword arguments passed to print().
+            event: The stream event to report.
         """
-        logger.debug(f"Progress [{run_id}]: {message}")
-        message = f"[{self.workflow_name}, {run_id}] {message}"
-        print(message, flush=True, **opts)
-
-    def report_error(self, run_id: str, message: str) -> None:
-        """Report workflow error to stderr.
-
-        Args:
-            run_id: Unique identifier for the workflow run.
-            message: Error message to display.
-        """
-        logger.debug(f"Error [{run_id}]: {message}")
-        self.report_progress(run_id, message, file=sys.stderr)
+        if event.internal:
+            return
+        logger.debug(f"{event.type.title()} [{run_id}]: {event.content}")
+        message = f"[{self.workflow_name}, {run_id}] {event.content}"
+        if event.type == "error":
+            print(message, flush=True, file=sys.stderr)
+        else:
+            print(message, flush=True)

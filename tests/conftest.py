@@ -7,10 +7,9 @@ workflows without I/O side effects.
 import tempfile
 
 import pytest
-from typing import Any
 
 from antkeeper.core.app import App
-from antkeeper.core.domain import State
+from antkeeper.core.domain import State, StreamEvent
 from antkeeper.core.runner import Runner
 
 
@@ -27,25 +26,20 @@ class TestChannel:
         self.initial_state: State = initial_state or {}
         self.progress_messages: list[str] = []
         self.error_messages: list[str] = []
+        self.events: list[StreamEvent] = []
 
-    def report_progress(self, run_id: str, message: str, **opts: Any) -> None:
-        """Capture a progress message to the in-memory list.
-
-        Args:
-            run_id: Unique identifier for the workflow run.
-            message: Progress message to capture.
-            **opts: Additional options (ignored by test double).
-        """
-        self.progress_messages.append(message)
-
-    def report_error(self, run_id: str, message: str) -> None:
-        """Capture an error message to the in-memory list.
+    def report(self, run_id: str, event: StreamEvent) -> None:
+        """Capture an event to the in-memory lists.
 
         Args:
             run_id: Unique identifier for the workflow run.
-            message: Error message to capture.
+            event: The stream event to capture.
         """
-        self.error_messages.append(message)
+        self.events.append(event)
+        if event.type == "error":
+            self.error_messages.append(event.content)
+        else:
+            self.progress_messages.append(event.content)
 
 
 @pytest.fixture

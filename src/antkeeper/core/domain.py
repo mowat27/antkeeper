@@ -2,10 +2,12 @@
 
 This module defines the fundamental types used throughout the framework:
 - State: Type alias for workflow data (dict[str, Any])
+- StreamEvent: Dataclass for streaming LLM events
 - Channel: Protocol for I/O boundaries and workflow configuration
 
 These types form the foundation for handler signatures and runner operations.
 """
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -40,13 +42,30 @@ directly):
 """
 
 
+@dataclass
+class StreamEvent:
+    """A single event from an LLM streaming response.
+
+    Attributes:
+        type: Event type — "progress", "assistant", "tool", "result",
+            "rate_limit", or "error".
+        content: Human-readable payload.
+        metadata: Optional structured data (usage, cost, rate limit fields).
+        internal: True for housekeeping calls (e.g. extraction step).
+    """
+    type: str
+    content: str
+    metadata: dict[str, Any] | None = field(default=None)
+    internal: bool = field(default=False)
+
+
 class Channel(Protocol):
     """Protocol for communication channels that drive workflow execution.
 
     Channels serve as I/O boundaries for workflows, defining what workflow to
     run (workflow_name), what data to start with (initial_state), and how to
-    communicate progress (report_progress, report_error). Implementations adapt
-    workflows to different environments like CLI, web servers, or message queues.
+    report events. Implementations adapt workflows to different environments
+    like CLI, web servers, or message queues.
 
     Attributes:
         type: The channel type identifier (e.g., "cli", "api", "web").
@@ -57,21 +76,11 @@ class Channel(Protocol):
     workflow_name: str
     initial_state: State
 
-    def report_progress(self, run_id: str, message: str, **opts: Any) -> None:
-        """Report workflow progress.
+    def report(self, run_id: str, event: StreamEvent) -> None:
+        """Report a workflow event.
 
         Args:
             run_id: Unique identifier for the workflow run.
-            message: Progress message to report.
-            **opts: Additional options for progress reporting.
-        """
-        ...
-
-    def report_error(self, run_id: str, message: str) -> None:
-        """Report a workflow error.
-
-        Args:
-            run_id: Unique identifier for the workflow run.
-            message: Error message to report.
+            event: The stream event to report.
         """
         ...

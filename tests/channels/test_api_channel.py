@@ -6,6 +6,7 @@ Tests the ApiChannel's type, state handling, and output reporting capabilities.
 import pytest
 
 from antkeeper.channels.api import ApiChannel
+from antkeeper.core.domain import StreamEvent
 
 
 class TestApiChannel:
@@ -24,16 +25,24 @@ class TestApiChannel:
         channel = ApiChannel("wf", initial_state)
         assert channel.initial_state == expected
 
-    def test_report_progress_prints_to_stdout(self, capsys):
-        """Test that progress messages are formatted and printed to stdout."""
+    def test_report_progress_event(self, capsys):
+        """Progress events are printed to stdout."""
         channel = ApiChannel("my_wf")
-        channel.report_progress("abc123", "step done")
+        channel.report("abc123", StreamEvent(type="progress", content="step done"))
         captured = capsys.readouterr()
         assert captured.out == "[my_wf, abc123] step done\n"
 
-    def test_report_error_prints_to_stderr(self, capsys):
-        """Test that error messages are formatted and printed to stderr."""
+    def test_report_error_event(self, capsys):
+        """Error events are printed to stderr."""
         channel = ApiChannel("my_wf")
-        channel.report_error("abc123", "something broke")
+        channel.report("abc123", StreamEvent(type="error", content="something broke"))
         captured = capsys.readouterr()
         assert captured.err == "[my_wf, abc123] something broke\n"
+
+    def test_report_internal_event_suppressed(self, capsys):
+        """Internal events are suppressed."""
+        channel = ApiChannel("my_wf")
+        channel.report("abc123", StreamEvent(type="result", content="internal", internal=True))
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""

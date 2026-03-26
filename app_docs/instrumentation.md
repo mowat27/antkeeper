@@ -11,12 +11,12 @@ def my_step(runner: Runner, state: State) -> State:
     return {**state, "result": "done"}
 ```
 
-The `Runner` delegates to the `Channel`, which formats and outputs the message based on its implementation:
+`runner.report_progress(message)` constructs a `StreamEvent(type="progress", content=message)` and calls `channel.report(run_id, event)`. The channel formats and outputs the event based on its implementation:
 
-- **CliChannel**: Writes to stdout with format `[workflow_name, run_id] message`
-- **ApiChannel**: Writes to stdout with format `[workflow_name, run_id] message` (appears in server logs)
-- **SlackChannel**: Posts to Slack thread via httpx sync POST with format `[workflow_name, run_id] message`
-- **TestChannel**: Appends to `progress_messages` list for verification
+- **CliChannel**: Writes to stdout with format `[workflow_name, run_id] message`. Internal events are suppressed.
+- **ApiChannel**: Writes to stdout with format `[workflow_name, run_id] message` (appears in server logs). Internal events are suppressed.
+- **SlackChannel**: Posts to Slack thread via httpx sync POST. Internal events are suppressed. Error events are prefixed with `[ERROR] `.
+- **TestChannel**: Appends all events to `events: list[StreamEvent]`. Progress events also go to `progress_messages`; error events go to `error_messages`.
 
 ## Error Reporting
 
@@ -26,7 +26,7 @@ Report non-fatal errors (informational warnings) via `runner.report_error()`:
 runner.report_error("optional validation failed, continuing")
 ```
 
-For fatal errors, use `runner.fail()`:
+`runner.report_error(message)` constructs a `StreamEvent(type="error", content=message)` and calls `channel.report(run_id, event)`. For fatal errors, use `runner.fail()`:
 
 ```python
 if "required_key" not in state:
@@ -34,6 +34,19 @@ if "required_key" not in state:
 ```
 
 `fail()` raises `WorkflowFailedError` with the message. The CLI catches this exception, prints to stderr, and exits with code 1. API channels log the error and allow the server to continue. SlackChannel posts error messages to the thread with `[ERROR]` prefix: `[workflow_name, run_id] [ERROR] message`.
+
+## Channel Protocol
+
+All channels implement `report(run_id: str, event: StreamEvent) -> None`. The `StreamEvent` dataclass (defined in `antkeeper.core.domain`) carries:
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `str` | `"progress"`, `"assistant"`, `"tool"`, `"result"`, `"rate_limit"`, or `"error"`. |
+| `content` | `str` | Human-readable payload. |
+| `metadata` | `dict[str, Any] \| None` | Structured data (usage, cost, rate limit fields). |
+| `internal` | `bool` | `True` for housekeeping calls (e.g. extraction step). Defaults to `False`. |
+
+Channels that do not render assistant/tool events (CLI, API, Slack) suppress them by checking `event.internal`. The `TestChannel` captures all events for test assertion.
 
 ## Run Identification
 
@@ -179,10 +192,18 @@ Module-level loggers exist in `cli.py`, `channels/cli.py`, `channels/slack.py`, 
 
 The `cc_handler` factory (`antkeeper.handlers.claude_code.factories`) eliminates boilerplate for building Claude Code handlers. It produces `(Runner, State) -> State` callables in two modes:
 
-- **Fire-and-forget mode** — run the LLM command with a single `run_prompt` call and return state unchanged.
-- **Extraction mode** — run the command first (Step 1), then send the response to haiku via `_extraction_prompt` (Step 2) to extract structured JSON fields. Parse the result with `extract_json` and merge the requested `state_updates` fields into state.
+- **Fire-and-forget mode** — create a `ClaudeCodeAgent`, stream its events, forward each to `runner.channel.report()`, and return state unchanged.
+- **Extraction mode** — stream the primary response through a middleware pipeline. The extraction middleware intercepts each `result` event and runs a second `run_prompt` call (to haiku) to extract structured JSON fields, yielding those events with `internal=True`. The handler collects the extraction result and merges the requested `state_updates` fields into state.
 
 The extraction step always uses the `haiku` model (constant `_EXTRACTION_MODEL`), regardless of the handler's configured model. This is an implementation detail, not a caller-facing knob.
+
+### Middleware Pipeline
+
+The factory uses a composable middleware pipeline to transform the event stream. A `Middleware` is a `Callable[[Iterator[StreamEvent]], Iterator[StreamEvent]]`. `build_pipeline(stream, middlewares)` chains middlewares left-to-right around the source stream.
+
+Currently one middleware is used: the extraction middleware (added automatically when `state_updates` is non-empty). All events pass through to `runner.channel.report()` regardless of whether they are internal — channels decide what to render.
+
+If the iterator is abandoned early (e.g. on error), `pipeline.close()` is called to trigger generator cleanup and release subprocess resources.
 
 ```python
 from antkeeper.handlers.claude_code import cc_handler
@@ -303,32 +324,51 @@ agent = ClaudeCodeAgent(model="sonnet", yolo=True, opts=["--fast"])
 - **yolo** (`bool`): When True, passes `--dangerously-skip-permissions` to skip permission prompts.
 - **opts** (`list[str] | None`): Arbitrary CLI arguments. When opts contains a flag that matches a convenience param (e.g., `--model`), the opts version takes precedence.
 
-### JSON Output and Telemetry
+### Streaming Output and Telemetry
 
-`ClaudeCodeAgent.prompt()` always passes `--output-format json` to the Claude CLI (unless the caller already includes `--output-format` in `opts`). It parses the JSON envelope from stdout and returns `data["result"]` — the plain string result. Callers see no change in the return type.
+`ClaudeCodeAgent.prompt()` passes `--output-format stream-json` to the Claude CLI (unless `--output-format` is already in `opts`). It reads JSONL from the subprocess stdout line by line, parsing each line into a `StreamEvent` and yielding it to the caller.
 
-After each successful call, the following fields are logged at DEBUG level on the `antkeeper.llm.claude_code` logger:
+**JSONL event mapping:**
+
+| Claude event type | StreamEvent type | Notes |
+|---|---|---|
+| `assistant` | `"assistant"` | Text content extracted from content blocks. |
+| `system` | `"tool"` | Tool invocations. |
+| `result` | `"result"` | Final response; metadata includes `session_id`, `duration_ms`, `usage`, `total_cost_usd`, `model`. |
+| `rate_limit` | `"rate_limit"` | Metadata includes `capacity`. |
+| unknown | (skipped) | Logged at DEBUG level, not yielded. |
+
+After yielding a `result` event, the following fields are logged at DEBUG level on the `antkeeper.llm.claude_code` logger:
 
 ```
 LLM session_id=<id> duration_ms=<ms> usage=<dict> cost=<usd>
 ```
 
-All fields are read via `.get()` and may be `None` if absent from the envelope. To correlate a run with its Claude session transcript, use the logged `session_id` to locate:
+To correlate a run with its Claude session transcript, use the logged `session_id` to locate:
 
 ```
 ~/.claude/projects/<project>/<session_id>.jsonl
+```
+
+**`collect_result(events)`** — convenience function that consumes the full stream and returns `(result_text, all_events)`. `result_text` is the content of the last non-internal `result` event. Use this in hand-written handlers that only need the final text:
+
+```python
+from antkeeper.llm.claude_code import run_prompt, collect_result
+
+response, _events = collect_result(run_prompt(...))
 ```
 
 ### Error Handling
 
 The agent raises two distinct exception types:
 
-- **`AgentExecutionError`** — subprocess execution failures: binary not found, or non-zero exit code.
-- **`ValueError`** — output parse failures: stdout is not valid JSON, or the parsed envelope is missing the `result` field. The error message includes a truncated excerpt of raw stdout for diagnostics.
+- **`AgentExecutionError`** — subprocess execution failures: binary not found (`FileNotFoundError` from `Popen`), or non-zero exit code after stream is consumed.
+- **`ValueError`** — malformed JSONL: a line that cannot be parsed as JSON raises immediately.
 
 ```python
 try:
-    response = agent.prompt("/specify build a feature")
+    for event in agent.prompt("/specify build a feature"):
+        runner.channel.report(runner.id, event)
 except AgentExecutionError as e:
     runner.fail(f"Agent failed: {e}")
 except ValueError as e:
@@ -336,6 +376,8 @@ except ValueError as e:
 ```
 
 The `cc_handler` factory catches both `AgentExecutionError` and `ValueError` and routes them through `runner.fail()`.
+
+**Process cleanup**: If the event iterator is abandoned before the subprocess exits (e.g. on error), the `finally` block in `ClaudeCodeAgent.prompt()` calls `proc.kill()` then `proc.wait()` to prevent subprocess leaks.
 
 No automatic retry. Handlers are responsible for error handling policy.
 
@@ -396,8 +438,10 @@ On exception: records exception on span, sets span status to ERROR, re-raises.
 
 Span name: `antkeeper.llm.call`
 Attributes set before call: `prompt_length`
-Attributes set after successful call: `session_id`, `duration_ms`, `input_tokens`, `output_tokens`, `total_cost_usd`, `model`
+Attributes set after the `result` event is received in the stream: `session_id`, `duration_ms`, `input_tokens`, `output_tokens`, `total_cost_usd`, `model`
 On exception: records exception on span, sets span status to ERROR, re-raises.
+
+**Note on span lifecycle with generators**: Because `prompt()` is a generator, the OTel span is managed with manual lifecycle calls (`start_span`, `span.end()`) rather than a `with` block. This avoids closing the span before all events are yielded. The span is always ended in the generator's `finally` block, whether the stream is fully consumed, abandoned, or raises an exception. The OTel context is attached before the `Popen` call and detached in the same `finally` block.
 
 ### Context Propagation to Claude Code Subprocesses
 

@@ -4,9 +4,8 @@ This module provides an ApiChannel that adapts workflows for use in
 web servers and HTTP APIs. Progress and errors are written to stdout/stderr.
 """
 import sys
-from typing import Any
 
-from antkeeper.core.domain import State
+from antkeeper.core.domain import State, StreamEvent
 
 
 class ApiChannel:
@@ -33,22 +32,17 @@ class ApiChannel:
         self.workflow_name = workflow_name
         self.initial_state: State = {**(initial_state or {})}
 
-    def report_progress(self, run_id: str, message: str, **opts: Any) -> None:
-        """Report workflow progress to stdout.
+    def report(self, run_id: str, event: StreamEvent) -> None:
+        """Report a workflow event to stdout/stderr.
 
         Args:
             run_id: Unique identifier for the workflow run.
-            message: Progress message to report.
-            **opts: Additional keyword arguments passed to print() function
-                (e.g., file=sys.stderr to redirect output).
+            event: The stream event to report.
         """
-        print(f"[{self.workflow_name}, {run_id}] {message}", flush=True, **opts)
-
-    def report_error(self, run_id: str, message: str) -> None:
-        """Report a workflow error to stderr.
-
-        Args:
-            run_id: Unique identifier for the workflow run.
-            message: Error message to report.
-        """
-        self.report_progress(run_id, message, file=sys.stderr)
+        if event.internal:
+            return
+        message = f"[{self.workflow_name}, {run_id}] {event.content}"
+        if event.type == "error":
+            print(message, flush=True, file=sys.stderr)
+        else:
+            print(message, flush=True)

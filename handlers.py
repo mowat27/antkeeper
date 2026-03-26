@@ -12,20 +12,29 @@ from antkeeper.core.domain import State
 from antkeeper.core.app import App, run_workflow
 from antkeeper.git.worktrees import Worktree, git_worktree
 from antkeeper.handlers.claude_code.factories import cc_handler
-from antkeeper.llm.claude_code import run_prompt
+from antkeeper.llm.claude_code import collect_result, run_prompt
 
 
 # --- Steps (factory-built) ---
 
 specify = cc_handler("/specify $prompt", state_updates=["spec_file", "slug"])
+"""Handler that runs the ``/specify`` slash command and stores ``spec_file`` and ``slug`` in state."""
+
 implement = cc_handler("/sdlc:implement $spec_file")
+"""Handler that runs the ``/sdlc:implement`` slash command against the current ``spec_file``."""
+
 document = cc_handler("/document this branch.")
+"""Handler that runs the ``/document`` slash command to document the current branch."""
+
 derive_feature = cc_handler(
     "/sdlc:derive_feature $prompt",
     state_updates=["feature_type", "slug"],
 )
+"""Handler that derives ``feature_type`` and ``slug`` from a prompt using the ``/sdlc:derive_feature`` command."""
+
 commit_push_raise_pr = cc_handler(
     "/commit_push_raise_pr", state_updates=["pr_url"])
+"""Handler that commits, pushes, and raises a PR, storing the resulting ``pr_url`` in state."""
 
 # --- App ---
 
@@ -66,13 +75,24 @@ def branch(runner: Runner, state: State) -> State:
 
 @app.handler
 def healthcheck(runner: Runner, state: State) -> State:
-    """Verify the agent pipeline is working by asking Claude to write a short poem."""
+    """Verify the agent pipeline is working by asking Claude to write a short poem.
+
+    Runs a simple LLM prompt and logs the response. Useful as a smoke-test to
+    confirm that the LLM backend is reachable and returning output.
+
+    Args:
+        runner: The active workflow runner, used for progress reporting and logging.
+        state: Current workflow state. Reads ``model`` if present.
+
+    Returns:
+        Updated state with ``poem`` set to the LLM's response text.
+    """
     runner.report_progress("Running healthcheck")
-    response = run_prompt(
+    response, _events = collect_result(run_prompt(
         "Write a short poem about agentic coding",
         runner.logger,
         model=state.get("model"),
-    )
+    ))
     runner.logger.info(f"healthcheck response: {response}")
     runner.report_progress("Healthcheck complete")
     runner.report_progress(response)
@@ -91,19 +111,43 @@ SDLC_STEPS = [specify, branch, implement, document]
 
 @app.handler
 def specify_implement(runner: Runner, state: State) -> State:
-    """Run partial SDLC workflow: specify -> implement."""
+    """Run partial SDLC workflow: specify -> implement.
+
+    Args:
+        runner: The active workflow runner.
+        state: Current workflow state, typically containing ``prompt``.
+
+    Returns:
+        Updated state after the specify and implement steps complete.
+    """
     return run_workflow(runner, state, [specify, implement])
 
 
 @app.handler
 def sdlc(runner: Runner, state: State) -> State:
-    """Run the full SDLC workflow: specify -> branch -> implement -> document."""
+    """Run the full SDLC workflow: specify -> branch -> implement -> document.
+
+    Args:
+        runner: The active workflow runner.
+        state: Current workflow state, typically containing ``prompt``.
+
+    Returns:
+        Updated state after all four SDLC steps complete.
+    """
     return run_workflow(runner, state, SDLC_STEPS)
 
 
 @app.handler
 def specify_and_branch(runner: Runner, state: State) -> State:
-    """Run partial SDLC workflow: specify -> branch."""
+    """Run partial SDLC workflow: specify -> branch.
+
+    Args:
+        runner: The active workflow runner.
+        state: Current workflow state, typically containing ``prompt``.
+
+    Returns:
+        Updated state with ``spec_file``, ``slug``, and ``branch_name`` set.
+    """
     return run_workflow(runner, state, SDLC_STEPS[0:2])
 
 
@@ -114,6 +158,15 @@ def sdlc_iso(runner: Runner, state: State) -> State:
     Creates a git worktree with a feature branch based on derived metadata,
     then executes the SDLC workflow (specify -> implement -> document) within
     that isolated environment. The worktree is not automatically removed.
+
+    Args:
+        runner: The active workflow runner.
+        state: Current workflow state, typically containing ``prompt``.
+
+    Returns:
+        Updated state after the workflow completes, with ``worktree_path`` set
+        to the worktree's filesystem path and ``branch_name`` set to the
+        ``feature_type/slug`` branch that was created.
     """
     state = derive_feature(runner, state)
     worktree_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{runner.id}"
