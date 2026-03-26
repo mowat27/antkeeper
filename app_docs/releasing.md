@@ -9,13 +9,14 @@ All runtime dependencies are core — there is no split between base and optiona
 ### Core Dependencies
 
 ```toml
-dependencies = ["python-dotenv", "httpx", "fastapi", "uvicorn[standard]", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "opentelemetry-distro"]
+dependencies = ["python-dotenv", "httpx", "fastapi", "uvicorn[standard]", "click", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "opentelemetry-distro"]
 ```
 
 - `python-dotenv` — environment variable loading
 - `httpx` — HTTP client for Slack integration
 - `fastapi` — HTTP server framework
 - `uvicorn[standard]` — ASGI server
+- `click` — CLI framework for declarative subcommand definitions
 - `opentelemetry-api` — OpenTelemetry tracing API
 - `opentelemetry-sdk` — OpenTelemetry SDK for span processing and export
 - `opentelemetry-exporter-otlp-proto-http` — OTLP HTTP exporter (e.g. for Axiom)

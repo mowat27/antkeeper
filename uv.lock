@@ -25,6 +25,7 @@ name = "antkeeper"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "opentelemetry-api" },
@@ -44,6 +45,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "opentelemetry-api" },

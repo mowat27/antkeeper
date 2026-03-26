@@ -24,7 +24,8 @@ src/antkeeper/
 │       └── factories.py # cc_handler factory implementation
 ├── helpers/
 │   ├── json.py         # JSON extraction utilities
-│   └── timestamps.py   # make_timestamp() and make_log_dir() utilities
+│   ├── timestamps.py   # make_timestamp() and make_log_dir() utilities
+│   └── github.py       # GitHub CLI helpers: fetch_gh_issue(), build_issues_prompt()
 ├── llm/                # LLM agent abstraction layer
 │   ├── __init__.py     # Agent protocol
 │   ├── errors.py       # AgentExecutionError
@@ -33,7 +34,8 @@ src/antkeeper/
 │   ├── __init__.py     # Shared utilities: run_workflow_background()
 │   ├── webhook.py      # POST /webhook endpoint
 │   └── slack_events.py # POST /slack_event endpoint
-├── cli.py              # Argparse-based CLI entry point
+├── cli.py              # Click-based CLI entry point
+├── loader.py           # Shared app-loading utility (used by CLI and server)
 └── server.py           # Server orchestrator (delegates to http/)
 ```
 
@@ -320,4 +322,4 @@ The **llm layer** (`src/antkeeper/llm/`) abstracts LLM interactions behind the `
 
 The **git layer** (`src/antkeeper/git/`) provides git integration. `core.py` for command execution, `branch.py` for branch operations, `worktrees.py` for isolated working directories.
 
-The **CLI** (`src/antkeeper/cli.py`) is the entry point. Loads user-defined handlers and wires everything together.
+The **CLI** (`src/antkeeper/cli.py`) is the click-based entry point. Subcommands (`run`, `resume`, `server`, `init`) wire everything together. App loading is delegated to `src/antkeeper/loader.py`, which is also used by `server.py`.

@@ -1,26 +1,23 @@
 """Command-line interface for Antkeeper workflow framework.
 
-This module provides the CLI entry point for executing Antkeeper workflows.
-It handles argument parsing, app loading from Python files, initial state
+This module provides the Click-based CLI entry point for executing Antkeeper
+workflows. It handles argument parsing, app loading, initial state
 configuration, and runner setup.
-
-The CLI supports a 'run' command that loads an app from a Python file,
-configures initial state from command-line arguments, and executes the
-requested workflow through a CliChannel.
 """
-import argparse
+
 import glob as globmod
-import importlib.util
 import json
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+import click
 
 from antkeeper.channels.cli import CliChannel
 from antkeeper.core.domain import WorkflowFailedError
 from antkeeper.core.runner import Runner
+from antkeeper.loader import load_app
 
 logger = logging.getLogger("antkeeper.cli")
 
@@ -80,31 +77,6 @@ def healthcheck(runner: Runner, state: State) -> State:
 '''
 
 
-def load_app(path: str):
-    """Dynamically load an Antkeeper app from a Python file.
-
-    Uses importlib to dynamically import a Python module and extract its
-    'app' attribute, which should be an instance of antkeeper.core.app.App.
-
-    Args:
-        path: File path to the Python module containing the app.
-
-    Returns:
-        App: The app object from the loaded module.
-
-    Raises:
-        FileNotFoundError: If the file cannot be found or the module spec
-            cannot be created.
-        AttributeError: If the loaded module does not have an 'app' attribute.
-    """
-    spec = importlib.util.spec_from_file_location("agents", path)
-    if spec is None or spec.loader is None:
-        raise FileNotFoundError(path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.app
-
-
 def parse_state_pairs(pairs: list[str]) -> dict[str, str]:
     """Parse command-line state pairs into a dictionary.
 
@@ -127,90 +99,17 @@ def parse_state_pairs(pairs: list[str]) -> dict[str, str]:
     return state
 
 
-def fetch_gh_issue(issue_number: int) -> dict:
-    """Fetch a GitHub issue via the gh CLI.
-
-    Args:
-        issue_number: The GitHub issue number to fetch.
-
-    Returns:
-        dict: Parsed JSON response from gh containing issue details.
-
-    Raises:
-        FileNotFoundError: If gh CLI is not installed.
-        subprocess.CalledProcessError: If gh command fails.
-        json.JSONDecodeError: If gh response is not valid JSON.
-    """
-    result = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "view",
-            str(issue_number),
-            "--json",
-            "number,title,body,comments,labels,state",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
-
-
-def build_issues_prompt(issues: list[dict]) -> str:
-    """Build a prompt from a list of GitHub issues.
-
-    Args:
-        issues: List of issue dictionaries from fetch_gh_issue.
-
-    Returns:
-        str: Formatted prompt containing all issues.
-    """
-    parts = ["Fix the following GitHub issue(s).\n"]
-    for issue in issues:
-        parts.append(f"--- Issue #{issue['number']} ---\n")
-        parts.append(json.dumps(issue, indent=2))
-        parts.append("\n\n")
-    return "".join(parts)
-
-
-def _build_common_state(args) -> dict:
-    """Build initial state from shared CLI flags.
-
-    Args:
-        args: Parsed argparse namespace with initial_state and model attributes.
-
-    Returns:
-        dict: State dictionary with parsed pairs and optional model.
-    """
-    state = parse_state_pairs(args.initial_state)
-    if args.model is not None:
-        state["model"] = args.model
-    return state
-
-
 def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict) -> None:
-    """Execute a workflow via CLI channel.
-
-    Loads the app, creates a CLI channel, runs the workflow, and handles errors.
-
-    Args:
-        agents_file: Path to Python file containing the app.
-        workflow_name: Name of the workflow to execute.
-        state: Initial state dictionary for the workflow.
-
-    Raises:
-        SystemExit: On file not found, missing app attribute, or workflow failure.
-    """
+    """Execute a workflow via CLI channel."""
     try:
         app = load_app(agents_file)
     except FileNotFoundError:
         logger.error(f"Agents file not found: {agents_file}")
-        print(f"Error: agents file not found: {agents_file}", file=sys.stderr)
+        click.echo(f"Error: agents file not found: {agents_file}", err=True)
         sys.exit(1)
     except AttributeError:
         logger.error(f"{agents_file} has no 'app' attribute")
-        print(f"Error: {agents_file} has no 'app' attribute", file=sys.stderr)
+        click.echo(f"Error: {agents_file} has no 'app' attribute", err=True)
         sys.exit(1)
 
     logger.info(f"App loaded from {agents_file}")
@@ -249,215 +148,135 @@ def _load_state_by_run_id(state_dir: str, run_id: str) -> tuple[dict, str]:
         return json.load(f), path
 
 
-def main() -> None:
-    """Main entry point for the Antkeeper CLI.
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """Antkeeper workflow framework CLI."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
 
-    Parses command-line arguments and executes the requested workflow or starts
-    the server based on the subcommand.
 
-    Commands:
-        run: Execute a workflow with the following options:
-            --agents-file: Path to Python file containing the app
-                (default: handlers.py)
-            --initial-state: Key=value pairs for initial workflow state
-                (repeatable)
-            --model: Model identifier to use for LLM operations
-            workflow_name: Name of the workflow to execute (positional)
-            prompt_files: Optional file paths whose contents are concatenated
-                into state["prompt"]. If no files given and stdin is piped,
-                stdin is read as the prompt.
+@cli.command()
+@click.option("--agents-file", default="handlers.py", help="Path to Python file containing the app.")
+@click.option("--initial-state", multiple=True, help="Key=value pairs for initial workflow state.")
+@click.option("--model", default=None, help="Model identifier to use for LLM operations.")
+@click.argument("workflow_name")
+@click.argument("prompt_files", nargs=-1, required=False)
+def run(agents_file, initial_state, model, workflow_name, prompt_files):
+    """Execute a workflow."""
+    state = parse_state_pairs(list(initial_state))
+    if model is not None:
+        state["model"] = model
+    if prompt_files:
+        parts = []
+        for path in prompt_files:
+            try:
+                parts.append(Path(path).read_text())
+            except FileNotFoundError:
+                logger.error(f"File not found: {path}")
+                click.echo(f"Error: file not found: {path}", err=True)
+                sys.exit(1)
+        state["prompt"] = "".join(parts)
+    elif not sys.stdin.isatty():
+        state["prompt"] = sys.stdin.read()
+    _run_workflow_cli(agents_file, workflow_name, state)
 
-        fix-gh-issues: Fetch GitHub issues and run a workflow against them:
-            --agents-file: Path to Python file containing the app
-                (default: handlers.py)
-            --initial-state: Key=value pairs for initial workflow state
-                (repeatable)
-            --model: Model identifier to use for LLM operations
-            workflow_name: Name of the workflow to execute (positional)
-            issue_numbers: One or more GitHub issue numbers to fetch and
-                pass as state["prompt"] and state["issue_numbers"].
 
-        server: Start the FastAPI server with the following options:
-            --host: Host address to bind (default: 127.0.0.1)
-            --port: Port number to bind (default: 8000)
-            --reload: Enable auto-reload on code changes
-            --agents-file: Path to Python file containing the app
-                (default: handlers.py)
+@cli.command()
+@click.option("--agents-file", default="handlers.py", help="Path to Python file containing the app.")
+@click.argument("run_id")
+def resume(agents_file, run_id):
+    """Resume a previously interrupted workflow run."""
+    try:
+        app = load_app(agents_file)
+    except FileNotFoundError:
+        logger.error(f"Agents file not found: {agents_file}")
+        click.echo(f"Error: agents file not found: {agents_file}", err=True)
+        sys.exit(1)
+    except AttributeError:
+        logger.error(f"{agents_file} has no 'app' attribute")
+        click.echo(f"Error: {agents_file} has no 'app' attribute", err=True)
+        sys.exit(1)
 
-        resume: Resume a previously interrupted workflow run:
-            --agents-file: Path to Python file containing the app
-                (default: handlers.py)
-            run_id: The 8-character hex run identifier from the interrupted run.
-                Loads the persisted state from app.state_dir, skips already-
-                completed steps, and re-executes the remaining steps as a new
-                run.
+    try:
+        state, state_path = _load_state_by_run_id(app.state_dir, run_id)
+    except FileNotFoundError:
+        click.echo(f"Error: no state found for run_id: {run_id}", err=True)
+        sys.exit(1)
 
-        init: Scaffold a new Antkeeper project with the following options:
-            path: Directory in which to create handlers.py
-                (default: current directory). Exits with an error if
-                handlers.py already exists or the directory does not exist.
+    if "workflow_name" not in state:
+        click.echo("Error: cannot resume: state file has no workflow_name", err=True)
+        sys.exit(1)
 
-    Raises:
-        SystemExit: Exit code 0 for success, 1 for errors (file not found,
-            invalid arguments, workflow failure).
+    if "_progress" not in state:
+        click.echo("Error: cannot resume: workflow has no progress to resume from", err=True)
+        sys.exit(1)
 
-    Examples:
-        antkeeper run my_workflow
-        antkeeper run --model sonnet specify prompts/describe.md
-        antkeeper run --model sonnet specify file1.md file2.md
-        echo "describe this project" | antkeeper run --model sonnet specify
-        antkeeper run --initial-state key1=val1 --initial-state key2=val2 my_workflow
-        antkeeper server --host 0.0.0.0 --port 8000
-    """
-    parser = argparse.ArgumentParser(prog="antkeeper")
-    subparsers = parser.add_subparsers(dest="command")
+    completed = state["_progress"]["completed"]
+    total = state["_progress"]["total"]
+    if completed >= total:
+        click.echo(f"Error: cannot resume: workflow already completed ({completed}/{total} steps)", err=True)
+        sys.exit(1)
 
-    common_run_parent = argparse.ArgumentParser(add_help=False)
-    common_run_parent.add_argument("--agents-file", default="handlers.py")
-    common_run_parent.add_argument("--initial-state", action="append", default=[])
-    common_run_parent.add_argument("--model", default=None)
-    common_run_parent.add_argument("workflow_name")
+    state["_resume_skip"] = completed
+    channel = CliChannel(workflow_name=state["workflow_name"], initial_state=state)
+    runner = Runner(app, channel)
+    logger.info(f"Resuming run_id={run_id} as new run_id={runner.id}")
+    try:
+        result = runner.run()
+    except WorkflowFailedError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    print(result)
 
-    run_parser = subparsers.add_parser("run", parents=[common_run_parent])
-    run_parser.add_argument("prompt_files", nargs="*")
 
-    fix_gh_issues_parser = subparsers.add_parser("fix-gh-issues", parents=[common_run_parent])
-    fix_gh_issues_parser.add_argument("issue_numbers", nargs="+", type=int)
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Host address to bind.")
+@click.option("--port", default=8000, type=int, help="Port number to bind.")
+@click.option("--reload", is_flag=True, help="Enable auto-reload on code changes.")
+@click.option("--agents-file", default="handlers.py", help="Path to Python file containing the app.")
+def server(host, port, reload, agents_file):
+    """Start the FastAPI server."""
+    import uvicorn
 
-    server_parser = subparsers.add_parser("server")
-    server_parser.add_argument("--host", default="127.0.0.1")
-    server_parser.add_argument("--port", type=int, default=8000)
-    server_parser.add_argument("--reload", action="store_true")
-    server_parser.add_argument("--agents-file", default="handlers.py")
+    os.environ["ANTKEEPER_HANDLERS_FILE"] = agents_file
+    uvicorn.run("antkeeper.server:app", host=host, port=port, reload=reload)
 
-    resume_parser = subparsers.add_parser("resume")
-    resume_parser.add_argument("--agents-file", default="handlers.py")
-    resume_parser.add_argument("run_id")
 
-    init_parser = subparsers.add_parser("init")
-    init_parser.add_argument("path", nargs="?", default=".")
+@cli.command()
+@click.argument("path", default=".")
+def init(path):
+    """Scaffold a new Antkeeper project."""
+    path = os.path.realpath(path)
+    target = os.path.join(path, "handlers.py")
+    if os.path.exists(target):
+        click.echo(f"Error: handlers.py already exists in {path}", err=True)
+        sys.exit(1)
+    try:
+        with open(target, "w") as f:
+            f.write(HANDLERS_TEMPLATE)
+    except FileNotFoundError:
+        click.echo(f"Error: directory does not exist: {path}", err=True)
+        sys.exit(1)
+    except PermissionError:
+        click.echo(f"Error: no write permission for {path}", err=True)
+        sys.exit(1)
+    print(f"Created handlers.py in {path}")
+    print()
+    print("Run your first workflow:")
+    print("  antkeeper run healthcheck")
+    print()
+    print("Start the API server:")
+    print("  antkeeper server")
+    print()
+    print("Environment variables:")
+    print("  ANTKEEPER_HANDLERS_FILE  Path to handlers file (default: handlers.py)")
+    print("  SLACK_BOT_TOKEN          Slack bot OAuth token (for Slack channel)")
+    print("  SLACK_BOT_USER_ID        Slack bot user ID (for Slack channel)")
+    print("  SLACK_COOLDOWN_SECONDS   Slack debounce cooldown in seconds (default: 30)")
 
-    args = parser.parse_args()
 
-    if args.command is None:
-        parser.print_help()
-        sys.exit(0)
-
-    logger.debug(f"CLI args parsed: command={args.command}")
-
-    if args.command == "run":
-        state = _build_common_state(args)
-        if args.prompt_files:
-            parts = []
-            for path in args.prompt_files:
-                try:
-                    parts.append(Path(path).read_text())
-                except FileNotFoundError:
-                    logger.error(f"File not found: {path}")
-                    print(f"Error: file not found: {path}", file=sys.stderr)
-                    sys.exit(1)
-            state["prompt"] = "".join(parts)
-        elif not sys.stdin.isatty():
-            state["prompt"] = sys.stdin.read()
-        _run_workflow_cli(args.agents_file, args.workflow_name, state)
-
-    elif args.command == "fix-gh-issues":
-        issues = []
-        try:
-            for issue_number in args.issue_numbers:
-                issues.append(fetch_gh_issue(issue_number))
-        except FileNotFoundError:
-            print("`gh` CLI not found", file=sys.stderr)
-            sys.exit(1)
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to fetch issue: {e.stderr}", file=sys.stderr)
-            sys.exit(1)
-        except json.JSONDecodeError:
-            print("Unexpected response from `gh` CLI", file=sys.stderr)
-            sys.exit(1)
-
-        state = _build_common_state(args)
-        state["prompt"] = build_issues_prompt(issues)
-        state["issue_numbers"] = args.issue_numbers
-        _run_workflow_cli(args.agents_file, args.workflow_name, state)
-
-    elif args.command == "resume":
-        try:
-            app = load_app(args.agents_file)
-        except FileNotFoundError:
-            logger.error(f"Agents file not found: {args.agents_file}")
-            print(f"Error: agents file not found: {args.agents_file}", file=sys.stderr)
-            sys.exit(1)
-        except AttributeError:
-            logger.error(f"{args.agents_file} has no 'app' attribute")
-            print(f"Error: {args.agents_file} has no 'app' attribute", file=sys.stderr)
-            sys.exit(1)
-
-        try:
-            state, state_path = _load_state_by_run_id(app.state_dir, args.run_id)
-        except FileNotFoundError:
-            print(f"Error: no state found for run_id: {args.run_id}", file=sys.stderr)
-            sys.exit(1)
-
-        if "workflow_name" not in state:
-            print("Error: cannot resume: state file has no workflow_name", file=sys.stderr)
-            sys.exit(1)
-
-        if "_progress" not in state:
-            print("Error: cannot resume: workflow has no progress to resume from", file=sys.stderr)
-            sys.exit(1)
-
-        completed = state["_progress"]["completed"]
-        total = state["_progress"]["total"]
-        if completed >= total:
-            print(f"Error: cannot resume: workflow already completed ({completed}/{total} steps)", file=sys.stderr)
-            sys.exit(1)
-
-        state["_resume_skip"] = completed
-        channel = CliChannel(workflow_name=state["workflow_name"], initial_state=state)
-        runner = Runner(app, channel)
-        logger.info(f"Resuming run_id={args.run_id} as new run_id={runner.id}")
-        try:
-            result = runner.run()
-        except WorkflowFailedError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        print(result)
-
-    elif args.command == "init":
-        path = os.path.realpath(args.path)
-        target = os.path.join(path, "handlers.py")
-        if os.path.exists(target):
-            print(f"Error: handlers.py already exists in {path}", file=sys.stderr)
-            sys.exit(1)
-        try:
-            with open(target, "w") as f:
-                f.write(HANDLERS_TEMPLATE)
-        except FileNotFoundError:
-            print(f"Error: directory does not exist: {path}", file=sys.stderr)
-            sys.exit(1)
-        except PermissionError:
-            print(f"Error: no write permission for {path}", file=sys.stderr)
-            sys.exit(1)
-        print(f"Created handlers.py in {path}")
-        print()
-        print("Run your first workflow:")
-        print("  antkeeper run healthcheck")
-        print()
-        print("Start the API server:")
-        print("  antkeeper server")
-        print()
-        print("Environment variables:")
-        print("  ANTKEEPER_HANDLERS_FILE  Path to handlers file (default: handlers.py)")
-        print("  SLACK_BOT_TOKEN          Slack bot OAuth token (for Slack channel)")
-        print("  SLACK_BOT_USER_ID        Slack bot user ID (for Slack channel)")
-        print("  SLACK_COOLDOWN_SECONDS   Slack debounce cooldown in seconds (default: 30)")
-
-    elif args.command == "server":
-        import uvicorn
-
-        os.environ["ANTKEEPER_HANDLERS_FILE"] = args.agents_file
-        uvicorn.run("antkeeper.server:app", host=args.host, port=args.port, reload=args.reload)
+main = cli
 
 
 if __name__ == "__main__":
