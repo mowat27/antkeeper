@@ -1,4 +1,5 @@
-default: check
+default:
+  @just --list
 
 check: ruff ty test
 

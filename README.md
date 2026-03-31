@@ -73,7 +73,7 @@ The same workflow runs from an HTTP webhook or a CI job. With a Slack app config
 
 **Channels** are I/O adapters. They decouple workflow logic from how it is triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel posts to threads (requires your own Slack app — see below). Handlers do not need to know which channel is active.
 
-**Agents** are the LLM abstraction. Any object with a `prompt(str) -> str` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI, but the protocol is deliberately minimal — plug in Codex, a local model, or any other backend. The `cc_handler` factory is a convenience method built on this protocol, but hand-written handlers can use it directly.
+**Agents** are the LLM abstraction. Any object with a `prompt(str) -> Iterator[StreamEvent]` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI using `--output-format stream-json`, streaming events as they arrive. The protocol is deliberately minimal — plug in any backend. The `cc_handler` factory is a convenience method built on this protocol, but hand-written handlers can use it directly via `run_prompt()` + `collect_result()`.
 
 ### Built-in Integrations
 
@@ -146,7 +146,7 @@ For Slack integration (requires your own Slack app), set `SLACK_BOT_TOKEN` and `
 - **Handlers are reducers** — `(Runner, State) -> State`. No mutation. Testable in isolation, composable in sequence.
 - **Runner is infrastructure** — execution context, logging, state persistence, and channel communication. Handlers receive it but do not manage it.
 - **Channels separate I/O from logic** — handlers are unaware of their trigger surface.
-- **Agent-agnostic** — the LLM layer is a protocol (`prompt(str) -> str`), not a binding to one tool.
+- **Agent-agnostic** — the LLM layer is a protocol (`prompt(str) -> Iterator[StreamEvent]`), not a binding to one tool.
 - **Composition over inheritance** — `run_workflow` folds state through a list of steps. No DAG scheduler, no base classes.
 - **Convention over configuration** — sensible defaults for log directories, state persistence, and worktree paths.
 

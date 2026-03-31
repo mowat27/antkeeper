@@ -168,10 +168,10 @@ If the message included file attachments, `initial_state["files"]` is also set.
 
 `SlackChannel` uses **synchronous** `httpx.Client` to call the Slack `chat.postMessage` API. This is intentional: handler code runs in a background thread (via `asyncio.to_thread`), so synchronous HTTP is appropriate and avoids mixing sync/async concerns.
 
-The `_post_to_thread()` method posts to the channel and thread identified at construction time. Both `report_progress()` and `report_error()` delegate to this method, formatting messages with the workflow name and run ID:
+`SlackChannel.report(run_id, event)` implements the `Channel` protocol. It suppresses events with `event.internal=True` (housekeeping calls such as the extraction step). For visible events, it delegates to `_post_to_thread()`, formatting messages with the workflow name and run ID:
 
-- Progress: `[workflow_name, run_id] message`
-- Error: `[workflow_name, run_id] [ERROR] message`
+- Non-error events: `[workflow_name, run_id] message`
+- Error events: `[workflow_name, run_id] [ERROR] message`
 
 ### Error Handling
 

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 from opentelemetry import trace
 
-from antkeeper.core.domain import State, Channel, WorkflowFailedError
+from antkeeper.core.domain import State, Channel, StreamEvent, WorkflowFailedError
 from antkeeper.core.app import App, _app_env
 
 if TYPE_CHECKING:
@@ -195,24 +195,24 @@ class Runner:
     def report_progress(self, message: str) -> None:
         """Report progress through the channel.
 
-        Logs the progress message and delegates to the channel's report_progress method.
+        Logs the progress message and delegates to the channel's report method.
 
         Args:
             message: Progress message to report.
         """
         self.logger.info(f"Progress: {message}")
-        self.channel.report_progress(self.id, message)
+        self.channel.report(self.id, StreamEvent(type="progress", content=message))
 
     def report_error(self, message: str) -> None:
         """Report an error through the channel.
 
-        Logs the error message and delegates to the channel's report_error method.
+        Logs the error message and delegates to the channel's report method.
 
         Args:
             message: Error message to report.
         """
         self.logger.error(f"Error reported: {message}")
-        self.channel.report_error(self.id, message)
+        self.channel.report(self.id, StreamEvent(type="error", content=message))
 
     def fail(self, message: str) -> NoReturn:
         """Fail the workflow by raising WorkflowFailedError.

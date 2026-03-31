@@ -1,35 +1,34 @@
 """Tests for ClaudeCodeAgent.
 
 Unit tests covering subprocess delegation, model flag handling,
-JSON envelope parsing, telemetry logging, and error propagation.
+JSONL streaming, telemetry logging, and error propagation.
 """
 
 import json
 import logging
-import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from antkeeper.core.domain import State
-from antkeeper.llm.claude_code import ClaudeCodeAgent
+from antkeeper.core.domain import State, StreamEvent
+from antkeeper.llm.claude_code import ClaudeCodeAgent, _parse_jsonl_line
 from antkeeper.llm.errors import AgentExecutionError
 
 
-def _envelope(result="ok", session_id="s1", duration_ms=100, usage=None, total_cost_usd=0.0):
-    """Build a minimal Claude JSON envelope for use in mocked subprocess responses.
+def _make_popen_mock(stdout_lines: list[str], returncode: int = 0, stderr: str = ""):
+    """Build a mock Popen that yields stdout_lines and returns the given exit code."""
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter(stdout_lines)
+    mock_proc.stderr = MagicMock()
+    mock_proc.stderr.read.return_value = stderr
+    mock_proc.returncode = returncode
+    mock_proc.wait.side_effect = lambda: setattr(mock_proc, 'returncode', returncode)
+    mock_proc.poll.return_value = returncode
+    return mock_proc
 
-    Args:
-        result: Value for the ``result`` field returned by ``agent.prompt()``.
-        session_id: Simulated Claude session identifier.
-        duration_ms: Simulated wall-clock duration of the CLI call.
-        usage: Token usage dict. Defaults to an empty dict when None.
-        total_cost_usd: Simulated cost of the call in USD.
 
-    Returns:
-        JSON-serialised envelope string suitable for use as ``stdout`` in a
-        ``subprocess.CompletedProcess`` mock.
-    """
+def _result_line(result="ok", session_id="s1", duration_ms=100, usage=None, total_cost_usd=0.0):
+    """Build a JSONL result line."""
     return json.dumps({
         "type": "result",
         "subtype": "success",
@@ -41,109 +40,138 @@ def _envelope(result="ok", session_id="s1", duration_ms=100, usage=None, total_c
     })
 
 
+def _assistant_line(content="hello"):
+    """Build a JSONL assistant line."""
+    return json.dumps({"type": "assistant", "content": content})
+
+
+def _system_line(content="tool output"):
+    """Build a JSONL system line."""
+    return json.dumps({"type": "system", "content": content})
+
+
 class TestClaudeCodeAgent:
     """Test suite for ClaudeCodeAgent subprocess delegation and error handling."""
 
-    def test_successful_prompt_returns_stdout(self):
-        """Test that a successful subprocess execution returns the result field from the JSON envelope."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(result="answer"), stderr=""
-            )
+    def test_prompt_returns_iterator_of_stream_events(self):
+        """Consuming the iterator yields StreamEvent instances."""
+        mock_proc = _make_popen_mock([_result_line(result="answer") + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
             agent = ClaudeCodeAgent()
-            assert agent.prompt("hello") == "answer"
+            events = list(agent.prompt("hello"))
+            assert len(events) == 1
+            assert isinstance(events[0], StreamEvent)
+            assert events[0].type == "result"
+            assert events[0].content == "answer"
 
-    def test_failed_prompt_raises_agent_execution_error(self):
-        """Test that non-zero exit code raises AgentExecutionError."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=1, stdout="", stderr="boom"
-            )
+    def test_prompt_parses_assistant_events(self):
+        """Assistant JSONL lines become type='assistant' events."""
+        lines = [_assistant_line("thinking...") + "\n", _result_line() + "\n"]
+        mock_proc = _make_popen_mock(lines)
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
+            agent = ClaudeCodeAgent()
+            events = list(agent.prompt("hello"))
+            assert events[0].type == "assistant"
+            assert events[0].content == "thinking..."
+
+    def test_prompt_parses_result_event(self):
+        """Result envelope becomes type='result' with metadata."""
+        line = _result_line(result="the answer", session_id="sess1", duration_ms=500, total_cost_usd=0.05)
+        mock_proc = _make_popen_mock([line + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
+            agent = ClaudeCodeAgent()
+            events = list(agent.prompt("q"))
+            assert events[0].type == "result"
+            assert events[0].content == "the answer"
+            assert events[0].metadata is not None
+            assert events[0].metadata["session_id"] == "sess1"
+
+    def test_prompt_non_zero_exit_raises(self):
+        """Non-zero exit code raises AgentExecutionError."""
+        mock_proc = _make_popen_mock([], returncode=1, stderr="boom")
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
             agent = ClaudeCodeAgent()
             with pytest.raises(AgentExecutionError):
-                agent.prompt("hello")
+                list(agent.prompt("hello"))
+
+    def test_prompt_binary_not_found(self):
+        """FileNotFoundError from Popen raises AgentExecutionError."""
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", side_effect=FileNotFoundError("claude")):
+            agent = ClaudeCodeAgent()
+            with pytest.raises(AgentExecutionError, match="claude binary not found"):
+                list(agent.prompt("hello"))
+
+    def test_prompt_malformed_jsonl_raises(self):
+        """Bad JSON raises ValueError."""
+        mock_proc = _make_popen_mock(["not json\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
+            agent = ClaudeCodeAgent()
+            with pytest.raises(ValueError, match="Malformed JSONL"):
+                list(agent.prompt("hello"))
+
+    def test_output_format_stream_json_flag(self):
+        """Verify --output-format stream-json in Popen args."""
+        mock_proc = _make_popen_mock([_result_line() + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
+            agent = ClaudeCodeAgent()
+            list(agent.prompt("hello"))
+            call_args = mock_popen.call_args[0][0]
+            idx = call_args.index("--output-format")
+            assert call_args[idx + 1] == "stream-json"
 
     def test_model_passed_to_subprocess(self):
-        """Test that model flag is included in subprocess args when set."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(), stderr=""
-            )
+        """Model flag is included in subprocess args when set."""
+        mock_proc = _make_popen_mock([_result_line() + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
             agent = ClaudeCodeAgent(model="opus")
-            agent.prompt("hello")
-            call_args = mock_run.call_args[0][0]
+            list(agent.prompt("hello"))
+            call_args = mock_popen.call_args[0][0]
             assert "--model" in call_args
             assert "opus" in call_args
 
     def test_no_model_omits_flag(self):
-        """Test that model flag is omitted when model is None."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(), stderr=""
-            )
+        """Model flag is omitted when model is None."""
+        mock_proc = _make_popen_mock([_result_line() + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
             agent = ClaudeCodeAgent()
-            agent.prompt("hello")
-            call_args = mock_run.call_args[0][0]
+            list(agent.prompt("hello"))
+            call_args = mock_popen.call_args[0][0]
             assert "--model" not in call_args
 
-    def test_missing_binary_raises_agent_execution_error(self):
-        """Test that FileNotFoundError from subprocess is wrapped in AgentExecutionError."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.side_effect = FileNotFoundError("claude")
-            agent = ClaudeCodeAgent()
-            with pytest.raises(AgentExecutionError, match="claude binary not found"):
-                agent.prompt("hello")
-
-    def test_empty_prompt_passed_through(self):
-        """Test that empty string prompt is passed to subprocess as-is."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(result=""), stderr=""
-            )
-            agent = ClaudeCodeAgent()
-            agent.prompt("")
-            call_args = mock_run.call_args[0][0]
-            assert call_args == ["claude", "--output-format", "json", "-p", ""]
-
     def test_yolo_adds_permissions_flag(self):
-        """Test that yolo=True adds --dangerously-skip-permissions to command."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(), stderr=""
-            )
+        """yolo=True adds --dangerously-skip-permissions to command."""
+        mock_proc = _make_popen_mock([_result_line() + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
             agent = ClaudeCodeAgent(yolo=True)
-            agent.prompt("hello")
-            call_args = mock_run.call_args[0][0]
+            list(agent.prompt("hello"))
+            call_args = mock_popen.call_args[0][0]
             assert "--dangerously-skip-permissions" in call_args
 
     def test_opts_passed_to_command(self):
-        """Test that opts are included in the subprocess command."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(), stderr=""
-            )
+        """Opts are included in the subprocess command."""
+        mock_proc = _make_popen_mock([_result_line() + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
             agent = ClaudeCodeAgent(opts=["--verbose"])
-            agent.prompt("hello")
-            call_args = mock_run.call_args[0][0]
-            assert call_args == ["claude", "--output-format", "json", "--verbose", "-p", "hello"]
+            list(agent.prompt("hello"))
+            call_args = mock_popen.call_args[0][0]
+            assert call_args == ["claude", "--output-format", "stream-json", "--verbose", "-p", "hello"]
 
     def test_opts_override_convenience_params(self):
-        """Test that opts take precedence over convenience params."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(), stderr=""
-            )
+        """Opts take precedence over convenience params."""
+        mock_proc = _make_popen_mock([_result_line() + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
             agent = ClaudeCodeAgent(
                 model="sonnet",
                 yolo=True,
                 opts=["--model", "opus", "--dangerously-skip-permissions"],
             )
-            agent.prompt("hello")
-            call_args = mock_run.call_args[0][0]
+            list(agent.prompt("hello"))
+            call_args = mock_popen.call_args[0][0]
             assert call_args == [
                 "claude",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--model",
                 "opus",
                 "--dangerously-skip-permissions",
@@ -151,129 +179,140 @@ class TestClaudeCodeAgent:
                 "hello",
             ]
 
-
-class TestJsonOutputMode:
-    """Tests for JSON output mode, envelope parsing, and telemetry logging."""
-
-    def test_output_format_json_flag_always_present(self):
-        """Test that --output-format json is always added to the command."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(), stderr=""
-            )
+    def test_empty_prompt_passed_through(self):
+        """Empty string prompt is passed to subprocess as-is."""
+        mock_proc = _make_popen_mock([_result_line(result="") + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
             agent = ClaudeCodeAgent()
-            agent.prompt("hello")
-            call_args = mock_run.call_args[0][0]
-            idx = call_args.index("--output-format")
-            assert call_args[idx + 1] == "json"
+            list(agent.prompt(""))
+            call_args = mock_popen.call_args[0][0]
+            assert call_args == ["claude", "--output-format", "stream-json", "--verbose", "-p", ""]
 
     def test_output_format_not_duplicated_when_in_opts(self):
-        """Test that --output-format is not duplicated when provided in opts."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(), stderr=""
-            )
-            agent = ClaudeCodeAgent(opts=["--output-format", "json"])
-            agent.prompt("hello")
-            call_args = mock_run.call_args[0][0]
+        """--output-format is not duplicated when provided in opts."""
+        mock_proc = _make_popen_mock([_result_line() + "\n"])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc) as mock_popen:
+            agent = ClaudeCodeAgent(opts=["--output-format", "stream-json"])
+            list(agent.prompt("hello"))
+            call_args = mock_popen.call_args[0][0]
             assert call_args.count("--output-format") == 1
 
-    def test_successful_prompt_returns_result_field(self):
-        """Test that prompt() returns the result field from the JSON envelope."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(result="the answer"), stderr=""
-            )
+    def test_system_events_become_tool_type(self):
+        """System JSONL lines become type='tool' events."""
+        lines = [_system_line("running tool") + "\n", _result_line() + "\n"]
+        mock_proc = _make_popen_mock(lines)
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
             agent = ClaudeCodeAgent()
-            assert agent.prompt("question") == "the answer"
+            events = list(agent.prompt("hello"))
+            assert events[0].type == "tool"
+            assert events[0].content == "running tool"
 
-    def test_invalid_json_raises_value_error(self):
-        """Test that non-JSON stdout raises ValueError."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="not json", stderr=""
-            )
+    def test_unknown_event_type_skipped(self):
+        """Unknown event types are silently skipped."""
+        lines = [json.dumps({"type": "unknown_type"}) + "\n", _result_line() + "\n"]
+        mock_proc = _make_popen_mock(lines)
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
             agent = ClaudeCodeAgent()
-            with pytest.raises(ValueError, match="non-JSON"):
-                agent.prompt("hello")
+            events = list(agent.prompt("hello"))
+            assert len(events) == 1
+            assert events[0].type == "result"
 
-    def test_missing_result_key_raises_value_error(self):
-        """Test that a JSON envelope without 'result' key raises ValueError."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            envelope = json.dumps({"type": "result", "session_id": "s1"})
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=envelope, stderr=""
-            )
+    def test_empty_stream_returns_empty_iterator(self):
+        """Empty JSONL stream (process exits 0 with no output) yields nothing."""
+        mock_proc = _make_popen_mock([])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
             agent = ClaudeCodeAgent()
-            with pytest.raises(ValueError, match="missing 'result' field"):
-                agent.prompt("hello")
+            events = list(agent.prompt("hello"))
+            assert events == []
+
+
+class TestParseJsonlLine:
+    """Tests for the _parse_jsonl_line helper."""
+
+    def test_assistant_event(self):
+        """String content on an assistant line is parsed into a StreamEvent."""
+        event = _parse_jsonl_line(_assistant_line("hi"))
+        assert event is not None
+        assert event.type == "assistant"
+        assert event.content == "hi"
+
+    def test_assistant_with_content_blocks(self):
+        """Content block list on an assistant line is concatenated into a single string."""
+        line = json.dumps({"type": "assistant", "content": [{"type": "text", "text": "hello "}, {"type": "text", "text": "world"}]})
+        event = _parse_jsonl_line(line)
+        assert event is not None
+        assert event.content == "hello world"
+
+    def test_result_event_has_metadata(self):
+        """Result line produces a StreamEvent with metadata including session_id."""
+        event = _parse_jsonl_line(_result_line(session_id="s1", duration_ms=100))
+        assert event is not None
+        assert event.type == "result"
+        assert event.metadata is not None
+        assert event.metadata["session_id"] == "s1"
+
+    def test_rate_limit_event(self):
+        """Rate-limit line is parsed into a rate_limit StreamEvent with capacity metadata."""
+        line = json.dumps({"type": "rate_limit", "capacity": 0.5})
+        event = _parse_jsonl_line(line)
+        assert event is not None
+        assert event.type == "rate_limit"
+        assert event.metadata is not None
+        assert event.metadata["capacity"] == 0.5
+
+    def test_empty_line_returns_none(self):
+        """Empty or whitespace-only lines return None without raising."""
+        assert _parse_jsonl_line("") is None
+        assert _parse_jsonl_line("  \n") is None
+
+    def test_malformed_json_raises(self):
+        """Non-JSON input raises ValueError with 'Malformed JSONL' message."""
+        with pytest.raises(ValueError, match="Malformed JSONL"):
+            _parse_jsonl_line("not json")
+
+    def test_unknown_type_returns_none(self):
+        """Lines with an unrecognised type field return None."""
+        line = json.dumps({"type": "future_type"})
+        assert _parse_jsonl_line(line) is None
+
+
+class TestTelemetryLogging:
+    """Tests for telemetry logging in streaming mode."""
 
     def test_telemetry_logged_at_debug(self, caplog):
-        """Test that session_id and duration_ms are logged at DEBUG level."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0,
-                stdout=_envelope(session_id="abc123", duration_ms=500),
-                stderr=""
-            )
+        """session_id and duration_ms are logged at DEBUG level."""
+        line = _result_line(session_id="abc123", duration_ms=500) + "\n"
+        mock_proc = _make_popen_mock([line])
+        with patch("antkeeper.llm.claude_code.subprocess.Popen", return_value=mock_proc):
             agent = ClaudeCodeAgent()
             with caplog.at_level(logging.DEBUG, logger="antkeeper.llm.claude_code"):
-                agent.prompt("hello")
+                list(agent.prompt("hello"))
             debug_text = " ".join(r.message for r in caplog.records)
             assert "abc123" in debug_text
             assert "500" in debug_text
-
-    def test_empty_result_string_returned(self):
-        """Test that an empty result string is returned without error."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=_envelope(result=""), stderr=""
-            )
-            agent = ClaudeCodeAgent()
-            assert agent.prompt("x") == ""
-
-    def test_missing_session_id_does_not_raise(self):
-        """Test that a missing session_id in the envelope does not raise."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            envelope = json.dumps({"type": "result", "result": "fine"})
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=envelope, stderr=""
-            )
-            agent = ClaudeCodeAgent()
-            assert agent.prompt("hello") == "fine"
-
-    def test_none_total_cost_does_not_raise(self):
-        """Test that total_cost_usd: null in the envelope does not raise."""
-        with patch("antkeeper.llm.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0,
-                stdout=_envelope(total_cost_usd=None),
-                stderr=""
-            )
-            agent = ClaudeCodeAgent()
-            assert agent.prompt("hello") == "ok"
 
 
 class TestIntegration:
     """Integration tests for agent execution within the framework."""
 
     def test_handler_using_mock_agent_in_runner(self, app, runner_factory):
-        """Test full pipeline with a fake agent (no subprocess)."""
+        """Full pipeline with a fake streaming agent (no subprocess) runs end-to-end."""
 
         @app.handler
         def ask(runner, state: State) -> State:
             class FakeAgent:
-                def prompt(self, prompt: str) -> str:
-                    return "canned"
+                def prompt(self, prompt: str):
+                    yield StreamEvent(type="result", content="canned")
             agent = FakeAgent()
-            return {**state, "result": agent.prompt(state["prompt"])}
+            events = list(agent.prompt(state["prompt"]))
+            return {**state, "result": events[0].content}
 
         runner, _source = runner_factory(app, "ask", {"prompt": "hi"})
         result = runner.run()
         assert result["result"] == "canned"
 
     def test_agent_execution_error_propagates(self, app, runner_factory):
-        """Test that AgentExecutionError propagates through the runner."""
+        """AgentExecutionError raised inside a handler propagates out of runner.run()."""
 
         @app.handler
         def fail_agent(runner, state: State) -> State:

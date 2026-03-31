@@ -9,20 +9,14 @@ import httpx
 import pytest
 
 from antkeeper.channels.slack import SlackChannel
+from antkeeper.core.domain import StreamEvent
 
 
 class TestSlackChannel:
     """Test suite for SlackChannel class."""
 
     def _make_channel(self, **overrides):
-        """Helper factory to create SlackChannel instances with test defaults.
-
-        Args:
-            **overrides: Override default channel configuration values.
-
-        Returns:
-            SlackChannel: Configured channel instance for testing.
-        """
+        """Helper factory to create SlackChannel instances with test defaults."""
         defaults: dict = {
             "workflow_name": "wf",
             "slack_token": "xoxb-test-token",
@@ -49,14 +43,14 @@ class TestSlackChannel:
         assert channel.initial_state == expected
 
     @patch("antkeeper.channels.slack.httpx.Client")
-    def test_report_progress_posts_to_slack_thread(self, mock_client_cls):
-        """Test that progress messages are posted to Slack thread via API."""
+    def test_report_progress_event(self, mock_client_cls):
+        """Progress events are posted to Slack thread via API."""
         mock_client = MagicMock()
         mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
 
         channel = self._make_channel()
-        channel.report_progress("run1", "step done")
+        channel.report("run1", StreamEvent(type="progress", content="step done"))
 
         mock_client.post.assert_called_once_with(
             "https://slack.com/api/chat.postMessage",
@@ -69,25 +63,37 @@ class TestSlackChannel:
         )
 
     @patch("antkeeper.channels.slack.httpx.Client")
-    def test_report_error_posts_error_formatted_message(self, mock_client_cls):
-        """Test that error messages are posted with ERROR prefix formatting."""
+    def test_report_error_event(self, mock_client_cls):
+        """Error events are posted with ERROR prefix formatting."""
         mock_client = MagicMock()
         mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
 
         channel = self._make_channel()
-        channel.report_error("run1", "something broke")
+        channel.report("run1", StreamEvent(type="error", content="something broke"))
 
         call_args = mock_client.post.call_args
         assert "[ERROR]" in call_args.kwargs["json"]["text"]
 
     @patch("antkeeper.channels.slack.httpx.Client")
-    def test_report_progress_survives_http_failure(self, mock_client_cls):
-        """Test that HTTP failures during progress reporting are handled gracefully."""
+    def test_report_internal_event_suppressed(self, mock_client_cls):
+        """Internal events are suppressed — no Slack API call."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        channel = self._make_channel()
+        channel.report("run1", StreamEvent(type="result", content="internal", internal=True))
+
+        mock_client.post.assert_not_called()
+
+    @patch("antkeeper.channels.slack.httpx.Client")
+    def test_report_survives_http_failure(self, mock_client_cls):
+        """HTTP failures during reporting are handled gracefully."""
         mock_client = MagicMock()
         mock_client.post.side_effect = httpx.HTTPError("connection failed")
         mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
 
         channel = self._make_channel()
-        channel.report_progress("run1", "step done")  # should not raise
+        channel.report("run1", StreamEvent(type="progress", content="step done"))  # should not raise

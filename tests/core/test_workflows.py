@@ -77,7 +77,11 @@ _ENV_PREFIX = "_ANTKEEPER_TEST_ENV_"
 
 
 class _SimpleChannel:
-    """Minimal channel implementation used by env var and callable log_dir tests."""
+    """Minimal channel implementation satisfying the channel protocol.
+
+    Used by env var and callable log_dir tests where event capture is not
+    required. Accepts all events and discards them silently.
+    """
 
     def __init__(self, workflow_name, initial_state=None):
         """Initialise the channel with a workflow name and optional initial state.
@@ -91,15 +95,28 @@ class _SimpleChannel:
         self.workflow_name = workflow_name
         self.initial_state = initial_state or {}
 
-    def report_progress(self, run_id, message, **opts):
-        """Accept a progress message; no-op for this minimal channel."""
+    def report(self, run_id, event):
+        """Accept a stream event; no-op for this minimal channel.
 
-    def report_error(self, run_id, message):
-        """Accept an error message; no-op for this minimal channel."""
+        Args:
+            run_id: Unique identifier for the workflow run.
+            event: The stream event to discard.
+        """
 
 
 def _make_env_app(**kwargs):
-    """Create an App with temp dirs and given kwargs."""
+    """Create an App backed by temporary directories with the given keyword arguments.
+
+    Convenience factory that wires up isolated temp dirs for log, worktree, and
+    state so individual tests do not need to manage directory setup.
+
+    Args:
+        **kwargs: Additional keyword arguments forwarded to the App constructor
+            (e.g. ``env``).
+
+    Returns:
+        App: A configured App instance ready for use in a test.
+    """
     return App(
         log_dir=tempfile.mkdtemp(),
         worktree_dir=tempfile.mkdtemp(),
@@ -109,7 +126,16 @@ def _make_env_app(**kwargs):
 
 
 def _run_handler(app, handler_fn, initial_state=None):
-    """Register a handler on app, run it, return final state."""
+    """Register a handler on ``app``, execute it, and return the final state.
+
+    Args:
+        app: The App instance to register the handler against.
+        handler_fn: The handler callable to register and run.
+        initial_state: Optional initial state dict. Defaults to an empty dict.
+
+    Returns:
+        State: The state dict produced by the handler after execution.
+    """
     app.add_handler(handler_fn)
     channel = _SimpleChannel(handler_fn.__name__, initial_state or {})
     runner = Runner(app, channel)
@@ -342,10 +368,10 @@ class TestAppEnvironment:
 
 
 class TestWorkflowProgress:
-    """Tests for _progress tracking in run_workflow."""
+    """Tests for ``_progress`` tracking injected by ``run_workflow``."""
 
     def test_run_workflow_final_state_has_progress(self, app, runner_factory):
-        """Returned state has _progress == {"total": N, "completed": N}."""
+        """Final state contains a ``_progress`` dict with total and completed counts equal."""
 
         def step_a(runner, state):
             return {**state, "a": 1}
@@ -362,7 +388,7 @@ class TestWorkflowProgress:
         assert result["_progress"] == {"total": 2, "completed": 2}
 
     def test_run_workflow_progress_increments_per_step(self, app, runner_factory):
-        """A capturing handler verifies _progress["completed"] increments."""
+        """``_progress["completed"]`` starts at 0 and increments by 1 after each executed step."""
         captured = []
 
         def capturing_step(runner, state):
@@ -378,7 +404,7 @@ class TestWorkflowProgress:
         assert captured == [0, 1, 2]
 
     def test_run_workflow_single_step_progress(self, app, runner_factory):
-        """Single step produces {"total": 1, "completed": 1}."""
+        """A workflow with a single step produces ``_progress`` with total and completed both equal to 1."""
 
         def step(runner, state):
             return state
@@ -392,7 +418,7 @@ class TestWorkflowProgress:
         assert result["_progress"] == {"total": 1, "completed": 1}
 
     def test_initial_progress_persisted_before_first_step(self, app, runner_factory):
-        """_progress with completed: 0 is on disk before the first step executes."""
+        """``_progress`` with ``completed: 0`` is persisted to disk before the first step executes."""
         captured_progress = {}
 
         def step(runner, state):
@@ -410,7 +436,7 @@ class TestWorkflowProgress:
         assert captured_progress == {"total": 1, "completed": 0}
 
     def test_single_handler_run_has_no_progress(self, app, runner_factory):
-        """Runner.run() directly produces no _progress key."""
+        """Calling ``Runner.run()`` directly (without ``run_workflow``) produces no ``_progress`` key in state."""
 
         @app.handler
         def simple(runner, state):

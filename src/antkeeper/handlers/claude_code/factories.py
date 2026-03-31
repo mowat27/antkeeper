@@ -5,8 +5,8 @@ The ``cc_handler`` factory eliminates boilerplate by producing
 
 * **fire-and-forget** – run the LLM command, discard the response, return
   state unchanged.
-* **extraction** – run the command first, then send the response to a fast
-  model (haiku) with ``_extraction_prompt`` to extract structured JSON fields.
+* **extraction** – run the command first, then send the response through
+  extraction middleware (haiku) to extract structured JSON fields.
   Parse the result with ``extract_json`` and merge the requested
   *state_updates* fields into state.
 
@@ -19,18 +19,36 @@ execution only.  Handler-level env merges with App-level env using
 ``{**app_env, **handler_env}`` semantics (handler values win).
 """
 
-import json as _json
+import logging
 import re
+from collections.abc import Callable, Iterator
 from typing import Protocol
 
 from antkeeper.core.app import _app_env
 from antkeeper.core.runner import Runner
-from antkeeper.core.domain import State
+from antkeeper.core.domain import State, StreamEvent
 from antkeeper.helpers.json import extract_json
-from antkeeper.llm.claude_code import run_prompt
+from antkeeper.llm.claude_code import ClaudeCodeAgent, run_prompt
 from antkeeper.llm.errors import AgentExecutionError
 
 _EXTRACTION_MODEL = "haiku"
+
+Middleware = Callable[[Iterator[StreamEvent]], Iterator[StreamEvent]]
+
+
+def build_pipeline(stream: Iterator[StreamEvent], middlewares: list[Middleware]) -> Iterator[StreamEvent]:
+    """Chain middlewares around a stream, left-to-right.
+
+    Args:
+        stream: The source event stream.
+        middlewares: List of middleware functions to apply.
+
+    Returns:
+        The transformed event stream.
+    """
+    for mw in middlewares:
+        stream = mw(stream)
+    return stream
 
 
 def _extraction_prompt(response: str, *, required_fields: list[str]) -> str:
@@ -45,6 +63,7 @@ def _extraction_prompt(response: str, *, required_fields: list[str]) -> str:
         containing exactly the *required_fields*, with ``null`` for any field
         not found in *response*.
     """
+    import json as _json
     return (
         f"Extract the following fields from the response below: "
         f"{_json.dumps(required_fields)}\n"
@@ -57,6 +76,55 @@ def _extraction_prompt(response: str, *, required_fields: list[str]) -> str:
         f"No markdown fences, no explanation. "
         f"If a field's value is not present in the response, use null."
     )
+
+
+def _extraction_middleware(
+    required_fields: list[str],
+    log: logging.Logger,
+    model_opts: tuple[str, list[str] | None],
+) -> Middleware:
+    """Create middleware that extracts structured data from result events.
+
+    Args:
+        required_fields: Field names to extract from the result.
+        log: Logger for the extraction call.
+        model_opts: Tuple of (model, opts) for the extraction agent.
+
+    Returns:
+        A middleware function.
+    """
+    def middleware(stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
+        """Pass events through, then run extraction after each result event.
+
+        Yields every event from *stream* unchanged.  When a ``result`` event is
+        encountered a second ``run_prompt`` call is made using the extraction
+        prompt; its events are re-yielded with ``internal=True`` so downstream
+        consumers can distinguish them from the primary response.
+
+        Args:
+            stream: The upstream event iterator to wrap.
+
+        Yields:
+            StreamEvent instances — originals first, then extraction events
+            (``internal=True``) immediately after each ``result`` event.
+        """
+        for event in stream:
+            yield event
+            if event.type == "result":
+                extraction_stream = run_prompt(
+                    _extraction_prompt(event.content, required_fields=required_fields),
+                    log,
+                    model=model_opts[0],
+                    opts=model_opts[1],
+                )
+                for ext_event in extraction_stream:
+                    yield StreamEvent(
+                        type=ext_event.type,
+                        content=ext_event.content,
+                        metadata=ext_event.metadata,
+                        internal=True,
+                    )
+    return middleware
 
 
 class Handler(Protocol):
@@ -105,32 +173,28 @@ def cc_handler(
         label = command.split()[0].lstrip("/")
 
     def handler(runner: Runner, state: State) -> State:
-        """Run the Claude Code command and return updated state.
+        """Execute the Claude Code command and return updated state.
 
-        In **fire-and-forget** mode (``state_updates`` is falsy) a single
-        ``run_prompt`` call is made and *state* is returned unchanged.
-
-        In **extraction** mode (``state_updates`` is truthy) two calls are made:
-
-        1. The interpolated *command* is sent to the primary model.
-        2. ``_extraction_prompt`` wrapping the response is sent to
-           ``_EXTRACTION_MODEL`` (haiku) to obtain a structured JSON object.
-
-        The fields listed in ``state_updates`` are extracted from the parsed
-        JSON and merged into *state* before it is returned.
+        Interpolates ``$var`` placeholders in *command* from *state*, selects
+        the effective model, builds the middleware pipeline, drains the event
+        stream (forwarding each event to the channel), and — when
+        *state_updates* was specified — parses the extraction result and merges
+        the requested fields into a copy of *state*.
 
         Args:
-            runner: Workflow runner used for progress reporting and failure signalling.
-            state: Current workflow state; ``$var`` placeholders in *command* are
-                resolved against it.
+            runner: The active Runner instance used for progress reporting,
+                channel access, and failure signalling.
+            state: The current workflow state dict.  ``$var`` references in
+                *command* are resolved against this dict.
 
         Returns:
-            Updated state dict with extracted fields merged in, or the original
-            *state* unchanged if ``state_updates`` is falsy.
+            A new state dict with extracted fields merged in (fire-and-forget
+            mode returns *state* unchanged).
 
         Raises:
-            WorkflowFailedError: Via ``runner.fail()`` when interpolation,
-                LLM execution, JSON parsing, or field extraction fails.
+            WorkflowFailedError: Via ``runner.fail()`` when the command or
+                extraction step raises ``KeyError``, ``AgentExecutionError``,
+                or ``ValueError``.
         """
         runner.report_progress(f"Running {label}")
         with _app_env(env):
@@ -141,16 +205,36 @@ def cc_handler(
                     command,
                 )
                 effective_model = model if model is not None else state.get("model")
-                response = run_prompt(prompt, runner.logger, model=effective_model)
+                agent = ClaudeCodeAgent(model=effective_model, yolo=True)
+                stream: Iterator[StreamEvent] = agent.prompt(prompt)
+
+                middlewares: list[Middleware] = []
                 if state_updates:
-                    extraction_response = run_prompt(
-                        _extraction_prompt(response, required_fields=state_updates),
-                        runner.logger,
-                        model=_EXTRACTION_MODEL,
-                        opts=["--max-turns", "1"],
+                    middlewares.append(
+                        _extraction_middleware(
+                            required_fields=state_updates,
+                            log=runner.logger,
+                            model_opts=(_EXTRACTION_MODEL, ["--max-turns", "1"]),
+                        )
                     )
-                    parsed = extract_json(extraction_response)
-                    result = {k: parsed[k] for k in state_updates}
+
+                pipeline = build_pipeline(stream, middlewares)
+
+                extraction_result: dict | None = None
+                try:
+                    for event in pipeline:
+                        runner.channel.report(runner.id, event)
+                        if event.type == "result" and event.internal:
+                            extraction_result = extract_json(event.content)
+                finally:
+                    close = getattr(pipeline, 'close', None)
+                    if close is not None:
+                        close()
+
+                if state_updates:
+                    if extraction_result is None:
+                        raise KeyError(f"No extraction result for {state_updates}")
+                    result = {k: extraction_result[k] for k in state_updates}
                 else:
                     result = {}
             except (KeyError, AgentExecutionError, ValueError) as error:

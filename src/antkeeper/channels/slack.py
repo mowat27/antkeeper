@@ -4,11 +4,10 @@ Posts handler progress and error messages to the originating Slack thread
 via synchronous httpx.Client calls.
 """
 import logging
-from typing import Any
 
 import httpx
 
-from antkeeper.core.domain import State
+from antkeeper.core.domain import State, StreamEvent
 
 logger = logging.getLogger("antkeeper.channels.slack")
 
@@ -77,23 +76,16 @@ class SlackChannel:
         except httpx.HTTPError as exc:
             logger.error(f"Failed to post to Slack thread: {exc}")
 
-    def report_progress(self, run_id: str, message: str, **opts: Any) -> None:
-        """Report workflow progress to the Slack thread.
+    def report(self, run_id: str, event: StreamEvent) -> None:
+        """Report a workflow event to the Slack thread.
 
         Args:
             run_id: Unique identifier for the workflow run.
-            message: Progress message to post.
-            **opts: Additional options (unused, for protocol compatibility).
+            event: The stream event to report.
         """
-        self._post_to_thread(f"[{self.workflow_name}, {run_id}] {message}")
-
-    def report_error(self, run_id: str, message: str) -> None:
-        """Report a workflow error to the Slack thread.
-
-        Posts an error message with [ERROR] prefix to the thread.
-
-        Args:
-            run_id: Unique identifier for the workflow run.
-            message: Error message to post.
-        """
-        self._post_to_thread(f"[{self.workflow_name}, {run_id}] [ERROR] {message}")
+        if event.internal:
+            return
+        if event.type == "error":
+            self._post_to_thread(f"[{self.workflow_name}, {run_id}] [ERROR] {event.content}")
+        else:
+            self._post_to_thread(f"[{self.workflow_name}, {run_id}] {event.content}")

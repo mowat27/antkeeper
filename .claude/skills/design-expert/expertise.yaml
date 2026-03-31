@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-25 (refactor/refactor-cli-refactor)
+# Last validated: 2026-03-26 (feature/agent-data-streaming)
 
 overview:
   name: antkeeper
@@ -201,9 +201,8 @@ domain_types:
     file: src/antkeeper/core/domain.py
     definition: "class WorkflowFailedError(Exception)"
     notes: >
-      Raised by Runner.fail() to signal workflow failure. Replaces the previous
-      SystemExit behavior. CLI catches this and exits with code 1. API server
-      catches it silently (already logged by Runner).
+      Raised by Runner.fail() to signal workflow failure. CLI catches this and
+      exits with code 1. API server catches it silently (already logged by Runner).
 
   State:
     file: src/antkeeper/core/domain.py
@@ -214,6 +213,20 @@ domain_types:
       Reserved keys: run_id, workflow_name, _progress (by run_workflow),
       _resume_skip (one-shot resume signal; stripped before execution, never persisted).
 
+  StreamEvent:
+    file: src/antkeeper/core/domain.py
+    definition: "@dataclass class StreamEvent"
+    attributes:
+      - "type: str  # 'progress', 'assistant', 'tool', 'result', 'rate_limit', 'error'"
+      - "content: str  # human-readable payload"
+      - "metadata: dict[str, Any] | None = None  # structured data (usage, cost, rate limit)"
+      - "internal: bool = False  # True for housekeeping events (e.g. extraction step)"
+    notes: >
+      Represents a single event from an LLM streaming response. Used as the
+      unit of data flow from agents through channels. Channels suppress
+      internal=True events (not shown to users). The 'result' type carries
+      the final LLM response text in content plus usage/cost in metadata.
+
   Channel:
     file: src/antkeeper/core/domain.py
     definition: Protocol
@@ -222,11 +235,13 @@ domain_types:
       - "workflow_name: str"
       - "initial_state: State"
     methods:
-      - "report_progress(run_id: str, message: str, **opts: Any) -> None"
-      - "report_error(run_id: str, message: str) -> None"
+      - "report(run_id: str, event: StreamEvent) -> None"
     notes: >
-      Structural (duck-typed) protocol. Any object with these attrs/methods
-      qualifies. This is the primary extension point for new I/O adapters.
+      Structural (duck-typed) protocol. Single report() method replaces the
+      previous report_progress/report_error pair. Channels suppress
+      internal=True events. Error events (event.type == 'error') route to
+      stderr; all others to stdout. This is the primary extension point for
+      new I/O adapters.
 
 core_objects:
   App:
@@ -288,20 +303,12 @@ core_objects:
       - "report_error(message) -> None  # logs then delegates to channel"
       - "fail(message) -> NoReturn  # logs, raises WorkflowFailedError"
     design_constraint: >
-      Runner.__init__ resolves app.log_dir — if callable, calls log_dir(self) to
-      get the path; otherwise uses the string directly. Creates log dir and state
-      dir (app.state_dir), sets up a FileHandler writing to
-      <log_dir>/<YYYYMMDDHHMMSS>-<id>.log and a state file at
-      <state_dir>/<YYYYMMDDHHMMSS>-<id>.json. Logger propagate=False to avoid
-      console output. run() resolves callable env values: if app.env is non-empty,
-      iterates values calling v(self) for callables and keeping static values,
-      producing a resolved dict passed to _app_env(). Callable errors propagate
-      before _app_env is entered. run() persists initial state before calling
-      the workflow handler; run_workflow() then persists with _progress before
-      the first step executes, and after each step; run() persists once more
-      after the handler returns. fail()
-      raises WorkflowFailedError instead of calling exit(1) — this allows CLI
-      and API to handle failures differently (CLI exits, API continues serving).
+      Runner.__init__ resolves app.log_dir (callable or string), creates log dir
+      and state dir, sets up FileHandler (<log_dir>/<ts>-<id>.log), state file at
+      <state_dir>/<ts>-<id>.json. Logger propagate=False. run() resolves callable
+      env values before _app_env; persists initial state before workflow; run_workflow
+      persists _progress before first step and after each step; run() persists once
+      more after completion. fail() raises WorkflowFailedError (not exit(1)).
 
   run_workflow:
     file: src/antkeeper/core/app.py
@@ -384,33 +391,25 @@ git_objects:
       - "exists: property -> bool  # checks os.path.isdir(self.path)"
       - "create(branch: str | None = None) -> None  # git worktree add, creates base_dir if needed"
       - "remove() -> None  # git worktree remove"
-    design_constraint: >
-      Paths are always resolved via os.path.realpath for consistency.
-      create() uses os.makedirs(exist_ok=True) for the base directory.
-      Both create() and remove() raise WorktreeError on non-zero git exit.
-      Logging via module-level logger (antkeeper.git.worktrees).
+    design_constraint: "Paths resolved via realpath. create() uses makedirs(exist_ok=True). Both create/remove raise WorktreeError on non-zero exit." 
 
   git_worktree:
     file: src/antkeeper/git/worktrees.py
     signature: "git_worktree(worktree, *, create=False, branch=None, remove=False) -> Generator[Worktree]"
     responsibility: >
-      Context manager that enters a git worktree directory. Guarantees cwd
-      restoration via try/finally. Optionally creates the worktree on entry
-      and removes it on exit.
-    behavior: >
-      entry: if create=True calls worktree.create(branch). If create=False and not exists, raises WorktreeError.
-      Saves cwd, chdir to worktree.path. exit: restores cwd (always). If remove=True, calls worktree.remove().
-      yields: the Worktree instance.
+      Context manager entering a git worktree. Guarantees cwd restoration (try/finally).
+    behavior: "entry: create=True -> worktree.create(branch); create=False+not exists -> WorktreeError. Saves cwd, chdir. exit: restore cwd always. remove=True -> worktree.remove(). yields Worktree." 
 
 llm_types:
   Agent:
     file: src/antkeeper/llm/__init__.py
     definition: Protocol
     methods:
-      - "prompt(prompt: str) -> str"
+      - "prompt(prompt: str) -> Iterator[StreamEvent]"
     notes: >
       Structural protocol for LLM agents. Any object with a prompt() method
-      qualifies. This is the extension point for adding new LLM backends.
+      qualifies. prompt() now yields StreamEvents (streaming). This is the
+      extension point for adding new LLM backends.
 
   AgentExecutionError:
     file: src/antkeeper/llm/errors.py
@@ -431,25 +430,45 @@ llm_types:
       prompt: >
         Builds command: ['claude'] + [--model model] (if model set and not in opts)
         + [--dangerously-skip-permissions] (if yolo and not in opts)
-        + [--output-format json] (if not in opts) + opts + ['-p', prompt].
-        Runs via subprocess. Parses stdout as JSON envelope, returns data["result"].
-        Logs prompt/response lengths at INFO, full content + telemetry
-        (session_id, duration_ms, usage, total_cost_usd) at DEBUG.
+        + [--output-format stream-json] (if not in opts) + opts + ['-p', prompt].
+        Runs via subprocess.Popen, reads stdout line-by-line via _parse_jsonl_line().
+        Yields StreamEvent instances. 'result' events include metadata (session_id,
+        duration_ms, usage, total_cost_usd, model). Telemetry set on OTel span via
+        _set_span_telemetry(). Logs prompt/response lengths at INFO, full content at DEBUG.
+        span is a standalone span (not using start_as_current_span) with OTel context
+        propagated via inject() into subprocess env.
       errors:
-        - "Non-zero exit -> AgentExecutionError with stderr"
+        - "Non-zero exit -> AgentExecutionError with stderr (after stdout drained)"
         - "Missing binary -> AgentExecutionError('claude binary not found')"
-        - "Non-JSON stdout -> ValueError('Claude returned non-JSON output: ...')"
-        - "Envelope missing 'result' key -> ValueError('Claude JSON envelope missing result field: ...')"
+        - "Malformed JSONL line -> ValueError('Malformed JSONL line: ...')"
+    private_functions:
+      _parse_jsonl_line: >
+        _parse_jsonl_line(line: str) -> StreamEvent | None.
+        Maps JSONL event types: 'assistant' -> StreamEvent(assistant), 'system' -> StreamEvent(tool),
+        'result' -> StreamEvent(result, metadata), 'rate_limit' -> StreamEvent(rate_limit, metadata).
+        Returns None for unknown types. Raises ValueError on malformed JSON.
+      _set_span_telemetry: >
+        _set_span_telemetry(span, metadata) -> None.
+        Sets session_id, duration_ms, input_tokens, output_tokens, total_cost_usd, model
+        attributes on the active span from result event metadata. No-op if metadata is None.
+
+  collect_result:
+    file: src/antkeeper/llm/claude_code.py
+    signature: "collect_result(events: Iterator[StreamEvent]) -> tuple[str, list[StreamEvent]]"
+    kind: module-level convenience function
+    responsibility: >
+      Consumes an event stream, returns (result_text, all_events). result_text is
+      the content of the last non-internal 'result' event. Utility for callers
+      that need to block on the full stream and extract the final result.
 
   run_prompt:
     file: src/antkeeper/llm/claude_code.py
-    signature: "run_prompt(prompt: str, logger: logging.Logger, model: str | None = None, opts: list[str] | None = None) -> str"
+    signature: "run_prompt(prompt: str, logger: logging.Logger, model: str | None = None, opts: list[str] | None = None) -> Iterator[StreamEvent]"
     kind: module-level convenience function
     responsibility: >
-      Creates a ClaudeCodeAgent(model=model, yolo=True, opts=opts), sends the prompt,
-      returns the response string. The standard way handlers invoke the LLM
-      — avoids constructing ClaudeCodeAgent directly. Not exported from
-      antkeeper/__init__.py; imported directly from antkeeper.llm.claude_code.
+      Creates a ClaudeCodeAgent(model=model, yolo=True, opts=opts), calls agent.prompt(),
+      returns the event iterator. The standard way handlers invoke the LLM.
+      Not exported from antkeeper/__init__.py; imported directly from antkeeper.llm.claude_code.
 
 helper_functions:
   fetch_gh_issue:
@@ -503,55 +522,49 @@ handler_factories:
     returns: "Handler Protocol — callable (Runner, State) -> State with __name__ attribute"
     responsibility: >
       Factory producing (Runner, State) -> State handler functions in two modes:
-      fire-and-forget mode (state_updates absent or empty) and extraction mode (state_updates
-      contains field names). An optional model argument overrides the LLM model per-handler.
+      fire-and-forget (state_updates absent/empty) and extraction mode (state_updates non-empty).
     constants:
-      _EXTRACTION_MODEL: "'haiku' — model always used for the extraction step in extraction mode"
-    private_functions:
+      _EXTRACTION_MODEL: "haiku — always used for extraction step"
+    types:
+      Middleware: "Callable[[Iterator[StreamEvent]], Iterator[StreamEvent]]"
+    module_functions:
+      build_pipeline: >
+        build_pipeline(stream, middlewares) -> Iterator[StreamEvent].
+        Chains middlewares left-to-right. Empty list = identity pass-through.
       _extraction_prompt: >
-        _extraction_prompt(response: str, *, required_fields: list[str]) -> str.
-        Builds a prompt instructing the extraction model to extract named fields from
-        a previous LLM response. Returns a JSON object with those fields (null if absent).
-        No markdown fences in the output. Used only in extraction mode.
+        _extraction_prompt(response, *, required_fields) -> str.
+        Prompts extraction model to return JSON with required_fields (null if absent).
+      _extraction_middleware: >
+        _extraction_middleware(required_fields, log, model_opts) -> Middleware.
+        Intercepts result events; runs second run_prompt (extraction prompt);
+        yields extraction events with internal=True after original result event.
+        Non-result events pass through. model_opts = (_EXTRACTION_MODEL, ["--max-turns", "1"]).
     behavior:
-      label_derivation: "Default label = first token of command with leading '/' stripped. Custom label overrides."
-      handler.__name__: "Set to label for framework introspection (compatible with app.add_handler())."
+      label_derivation: "Default label = first token of command with leading slash stripped."
+      handler.__name__: "Set to label for framework introspection (app.add_handler() compatible)."
       interpolation: >
-        $var placeholders are substituted from state via regex at call time:
-        re.sub(r'\$([a-zA-Z_]\w*)', lambda m: str(state[m.group(1)]), command).
-        ${var} brace form is intentionally NOT interpolated — passes through as literal text.
-        Missing state key raises KeyError, caught and routed to runner.fail().
+        $var placeholders substituted from state via regex. ${var} NOT interpolated.
+        Missing state key -> KeyError -> runner.fail().
       fire_and_forget_mode: >
-        When state_updates is None or empty: runs interpolated command via run_prompt,
-        returns state unchanged. No JSON parsing.
+        state_updates None/empty: streams agent.prompt() through empty pipeline,
+        forwards each event to runner.channel.report(). Returns state unchanged.
       extraction_mode: >
-        When state_updates is non-empty: TWO run_prompt calls are made.
-        Step 1 — sends interpolated command to the primary model (factory model or state['model']).
-        Step 2 — sends _extraction_prompt(response, required_fields=state_updates) to
-        _EXTRACTION_MODEL ("haiku") to extract structured JSON. The extraction model is
-        always "haiku" regardless of the factory or state model.
-        Calls extract_json on the extraction response, picks only the listed fields from
-        parsed dict, merges into state. Missing field in response raises KeyError, caught
-        and routed to runner.fail().
+        state_updates non-empty: pipeline with _extraction_middleware (haiku, --max-turns 1).
+        All events forwarded to channel. Internal result events parsed via extract_json.
+        Extracted fields merged into state. Missing field -> KeyError -> runner.fail().
+      streaming: >
+        Handler drains pipeline event-by-event via runner.channel.report(runner.id, event).
+        Channels receive all streaming events (assistant, tool, result) in real time.
+        Internal=True events forwarded but suppressed by channels. Pipeline closed in finally.
       model_resolution: >
-        Primary step: model=model if model is not None else state.get("model"). Factory-level
-        model takes precedence over state['model']. When neither is set, run_prompt receives
-        model=None (uses ClaudeCodeAgent default).
-        Extraction step: always uses _EXTRACTION_MODEL ("haiku"), ignoring factory/state model.
+        Primary: model if not None else state.get("model"). Factory model beats state model.
+        Extraction: always haiku with --max-turns 1.
       error_handling: >
-        Single try/except catches KeyError (missing state key or JSON field),
-        AgentExecutionError (LLM failure in either step), and ValueError (bad JSON).
-        All route to runner.fail(f"{label} failed: {error}") -> WorkflowFailedError.
-        Step 1 failure short-circuits before step 2 is called.
+        KeyError, AgentExecutionError, ValueError all route to runner.fail("{label} failed: {error}").
       env_handling: >
-        When env is provided, the handler body (interpolation, both run_prompt calls, extraction)
-        executes inside _app_env(env). Handler-level env merges with App-level env via nesting:
-        Runner.run() sets App-level env first (via _app_env in runner.py), and the inner
-        _app_env(env) in the handler overwrites overlapping keys for handler-level env.
-        Handler env values are static str only — no callable support. env=None is a no-op.
-        _app_env imported from antkeeper.core.app into factories.py for reuse.
-      progress: "Reports 'Running {label}' before and '{label} complete' after via runner.report_progress."
-
+        env provided -> handler body executes inside _app_env(env). Handler env wins over
+        App-level env. Static str only. env=None is a no-op.
+      progress: "Reports Running {label} before and {label} complete after."
   handlers_package_exports:
     file: src/antkeeper/handlers/claude_code/__init__.py
     purpose: >
@@ -568,8 +581,9 @@ channel_implementations:
     behavior:
       type: '"cli"'
       initial_state: "Copies input dict or defaults to {}"
-      report_progress: "Prints formatted [workflow_name, run_id] message to stdout with flush=True"
-      report_error: "Delegates to report_progress with file=sys.stderr"
+      report: >
+        Suppresses internal=True events. Prints [workflow_name, run_id] + event.content
+        to stdout (flush=True) or stderr if event.type == 'error'.
 
   ApiChannel:
     file: src/antkeeper/channels/api.py
@@ -578,8 +592,9 @@ channel_implementations:
     behavior:
       type: '"api"'
       initial_state: "Copies input dict or defaults to {}"
-      report_progress: "Prints formatted [workflow_name, run_id] message to stdout with flush=True"
-      report_error: "Delegates to report_progress with file=sys.stderr"
+      report: >
+        Identical to CliChannel.report(). Suppresses internal=True events.
+        Prints to stdout or stderr depending on event.type.
     notes: >
       Identical to CliChannel except type="api". Both use flush=True.
       Designed for FastAPI server where output goes to Uvicorn logs.
@@ -591,14 +606,13 @@ channel_implementations:
     behavior:
       type: '"slack"'
       initial_state: "Copies input dict or defaults to {}"
-      report_progress: "Posts [workflow_name, run_id] message to Slack thread via httpx sync POST"
-      report_error: "Posts [workflow_name, run_id] [ERROR] message to Slack thread"
+      report: >
+        Suppresses internal=True events. Posts to Slack thread via _post_to_thread().
+        Error events include [ERROR] prefix. HTTP errors caught and logged, never raised.
     design_constraint: >
       Uses sync httpx.Client (not async) because handlers run in threadpool
-      via asyncio.to_thread. HTTP errors are caught and logged, never
-      propagated — Slack failures must not crash the workflow. Thread context
-      (channel_id, thread_ts) captured at construction from the original
-      @mention event.
+      via asyncio.to_thread. Slack failures must not crash the workflow. Thread context
+      (channel_id, thread_ts) captured at construction from the original @mention event.
 
 cli_entry_point:
   file: src/antkeeper/cli.py
@@ -639,11 +653,8 @@ cli_entry_point:
         - "--agents-file (default: handlers.py)"
         - "run_id (positional) — 8-char hex from the interrupted run"
       flow: >
-        1. load_app() 2. _load_state_by_run_id(app.state_dir, run_id)
-        3. Validate workflow_name present 4. Validate _progress present (no resume for direct handlers)
-        5. Validate completed < total 6. state["_resume_skip"] = completed
-        7. CliChannel(workflow_name, initial_state=state) 8. Runner (new run_id/files)
-        9. runner.run() -> run_workflow consumes _resume_skip, skips completed steps
+        load_app -> _load_state_by_run_id -> validate workflow_name, _progress, completed<total
+        -> state["_resume_skip"]=completed -> CliChannel+Runner -> run_workflow consumes _resume_skip
       error_handling:
         - "Agents file not found / no app / state file not found / no workflow_name / no _progress / already completed -> stderr + exit(1)"
         - "WorkflowFailedError -> stderr + exit(1)"
@@ -774,15 +785,6 @@ http_modules:
       single-threaded event loop. (channel_id, ts) key naturally
       deduplicates app_mention + message events.
 
-handlers_package:
-  note: >
-    The canonical handler factory lives in src/antkeeper/handlers/claude_code/factories.py.
-    See handler_factories section above for full detail. There is no top-level
-    handlers.py or pre-built App in the framework source; users create their own
-    handlers file (default: handlers.py) that imports cc_handler from
-    antkeeper.handlers.claude_code and registers handlers via app.add_handler()
-    or @app.handler.
-
 data_flow:
   cli_happy_path:
     - "CLI parses args -> loads agents file -> gets App"
@@ -881,22 +883,25 @@ testing_design:
     - tests/test_server.py — FastAPI webhook endpoint (returns run_id, 404 for unknown workflow, 422 for invalid body)
     - tests/channels/test_slack_channel.py — SlackChannel type, initial_state, report_progress/error posts, HTTP failure resilience
     - tests/test_slack_server.py — Slack event endpoint (url_verification, bot filter, mention, edit, reply, delete, timer dispatch, unknown workflow, dedup, env var validation)
-    - tests/llm/test_claude_code_agent.py — ClaudeCodeAgent: TestClaudeCodeAgent (subprocess delegation, model/yolo/opts flags, missing binary), TestJsonOutputMode (--output-format json always present, no duplication in opts, envelope parsing returns result field, non-JSON raises ValueError, missing result key raises ValueError, telemetry logged at DEBUG, partial envelope OK), TestIntegration (fake agent in runner, AgentExecutionError propagates)
+    - tests/llm/test_claude_code_agent.py — ClaudeCodeAgent: subprocess delegation via Popen, model/yolo/opts flags, missing binary -> AgentExecutionError, stream-json output format, JSONL line parsing via _parse_jsonl_line (assistant/system/result/rate_limit/unknown types), result event metadata/telemetry, non-zero exit after stream raises AgentExecutionError
+    - tests/llm/test_middleware.py — build_pipeline (identity, single mw, sequential order), _extraction_middleware (intercepts result, splices internal events, passes non-result events, error propagation)
     - tests/helpers/test_extract_json.py — JSON extraction from LLM responses
     - tests/helpers/test_timestamps.py — make_timestamp format, make_log_dir returns callable, produces correct path, timestamp captured at call time
     - tests/git/test_worktree.py — Worktree class (path, exists, create, create+branch, remove, errors)
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler: label derivation, extraction mode (two-step, haiku always for extraction, step 1 failure skips step 2), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling, handler-level env (set/restore, both steps)
+    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline (events forwarded to channel), extraction mode (middleware inserts internal events, haiku + max-turns 1), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling (KeyError/AgentExecutionError/ValueError -> runner.fail), handler-level env (set/restore)
     - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
-    - tests/llm/test_run_prompt.py — run_prompt convenience function: delegates to ClaudeCodeAgent, passes model/yolo/opts
+    - tests/llm/test_run_prompt.py — run_prompt: returns Iterator[StreamEvent], delegates to ClaudeCodeAgent with yolo=True, passes model/opts
     - tests/core/test_loader.py — TestLoadApp: returns app object, FileNotFoundError on missing file, AttributeError on missing app attr
     - tests/helpers/test_github.py — TestFetchGhIssue (gh subprocess, errors), TestBuildIssuesPrompt (single/multi issue format)
 
 key_design_decisions:
   - >
     Channel is a Protocol, not an ABC. Extensions use structural subtyping.
+    Channel.report(run_id, StreamEvent) is the single reporting method; the previous
+    report_progress/report_error pair was unified into report() with event.type routing.
   - >
     Handlers receive (runner, state) and return State. Runner is the only
     framework object a handler interacts with.
@@ -931,17 +936,19 @@ key_design_decisions:
     Per-run file logging. Each Runner creates an isolated log file. No console
     logging from the framework. Module-level loggers provide debug tracing.
   - >
-    cc_handler factory: fire-and-forget (no state_updates) or two-step extraction mode
-    (primary model then "haiku" for JSON extraction). Factory model overrides state['model'];
-    extraction always uses "haiku". Optional env sets handler-scoped os.environ vars (static
-    str only, overrides App-level env). Handler __name__ set to label for app.add_handler().
+    cc_handler factory: streaming pipeline architecture. Creates a ClaudeCodeAgent and drains
+    its event stream, forwarding each event to the channel in real time. Middlewares transform
+    the stream (e.g. extraction middleware). Fire-and-forget (no state_updates) = empty pipeline.
+    Extraction mode = pipeline with _extraction_middleware (haiku + --max-turns 1) that splices
+    internal extraction events after each result event. Factory model overrides state['model'];
+    extraction always uses haiku. Internal events (internal=True) are forwarded to channel but
+    channels suppress them from user output. Handler __name__ set to label for app.add_handler().
     See handler_factories section for full detail.
   - >
-    Git worktree isolation. The sdlc_iso handler creates a git worktree for
-    each run, branching on {feature_type}/{slug}. This enables parallel
-    feature development without cwd or branch conflicts. Worktrees are kept
-    after workflow completion (remove=False) so developers can inspect results.
-    App.worktree_dir configures the base directory (default "trees/").
+    Git worktree isolation. sdlc_iso creates a worktree per run on
+    {feature_type}/{slug}, enabling parallel feature dev without cwd/branch
+    conflicts. Worktrees kept after completion (remove=False) for inspection.
+    App.worktree_dir configures base directory (default "trees/").
   - >
     BREAKING: Runner.fail() raises WorkflowFailedError instead of exit(1).
     This decouples workflow failure from process termination, enabling both
@@ -949,18 +956,13 @@ key_design_decisions:
     appropriately. CLI catches WorkflowFailedError and exits 1. API server
     catches it in background task and continues serving other requests.
   - >
-    Dual execution model: CLI and HTTP API. CliChannel and ApiChannel are
-    nearly identical (both print to stdout/stderr) but have different type
-    identifiers. The server module provides POST /webhook for async workflow
-    execution. FastAPI BackgroundTasks runs workflows in same process after
-    response — acceptable for initial implementation, production can scale
-    with multiple uvicorn workers.
+    Dual execution model: CLI and HTTP API. CliChannel and ApiChannel are nearly
+    identical (stdout/stderr) but have different type identifiers. POST /webhook
+    runs workflows in FastAPI BackgroundTasks (same process, scales with workers).
   - >
-    Server factory pattern: create_app() loads agents file and returns
-    configured FastAPI instance. This makes testing possible — tests call
-    create_app() with custom agents file. Module-level app = create_app()
-    provides default instance for uvicorn to import. The --agents-file CLI
-    option is propagated via ANTKEEPER_HANDLERS_FILE environment variable.
+    Server factory pattern: create_app() loads agents file, returns configured
+    FastAPI. Tests call create_app() with custom agents file. app = create_app()
+    module-level for uvicorn. --agents-file propagated via ANTKEEPER_HANDLERS_FILE.
   - >
     Server as thin orchestrator. server.py defines routes inline and
     delegates to http/ package: handle_webhook (webhook.py) and
@@ -974,18 +976,16 @@ key_design_decisions:
     text/files. Timer fire dispatches to the workflow handler. Pending
     store is instance-scoped on the processor for test isolation.
   - >
-    SlackChannel uses sync httpx (handlers run in threadpool). Server
-    endpoint uses async httpx (event loop). Independent clients.
-    Channel captures thread context (channel_id, thread_ts) at construction
-    from the original @mention event.
+    SlackChannel uses sync httpx (handlers in threadpool); server endpoint uses
+    async httpx (event loop). Independent clients. Thread context (channel_id,
+    thread_ts) captured at construction from the @mention event.
   - >
     Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS)
     read from environment at request time. python-dotenv loads .env file in
     create_app(). .env is gitignored.
   - >
-    App-level env injection via App(env={...}). Values are static or callables
-    accepting (runner); resolved by Runner.run() before _app_env sets/restores
-    os.environ. App.log_dir also supports callables (resolved at Runner.__init__).
+    App-level env injection via App(env={...}). Values are static or callables(runner);
+    resolved by Runner.run() before _app_env. App.log_dir also supports callables.
     Not thread-safe (os.environ is process-global); acceptable for single-threaded model.
   - >
     Automatic state persistence: Runner writes JSON state at 4 lifecycle points
