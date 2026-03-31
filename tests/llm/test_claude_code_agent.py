@@ -171,6 +171,7 @@ class TestClaudeCodeAgent:
                 "claude",
                 "--output-format",
                 "stream-json",
+                "--verbose",
                 "--model",
                 "opus",
                 "--dangerously-skip-permissions",
@@ -185,7 +186,7 @@ class TestClaudeCodeAgent:
             agent = ClaudeCodeAgent()
             list(agent.prompt(""))
             call_args = mock_popen.call_args[0][0]
-            assert call_args == ["claude", "--output-format", "stream-json", "-p", ""]
+            assert call_args == ["claude", "--output-format", "stream-json", "--verbose", "-p", ""]
 
     def test_output_format_not_duplicated_when_in_opts(self):
         """--output-format is not duplicated when provided in opts."""

@@ -161,6 +161,8 @@ class ClaudeCodeAgent:
             cmd.append("--dangerously-skip-permissions")
         if "--output-format" not in opts_list:
             cmd.extend(["--output-format", "stream-json"])
+        if "--verbose" not in opts_list:
+            cmd.append("--verbose")
         cmd.extend(opts_list)
         cmd.extend(["-p", prompt])
         logger.info(f"LLM prompt submitted (length={len(prompt)} chars)")

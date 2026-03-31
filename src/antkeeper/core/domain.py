@@ -7,6 +7,8 @@ This module defines the fundamental types used throughout the framework:
 
 These types form the foundation for handler signatures and runner operations.
 """
+import dataclasses
+import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -57,6 +59,10 @@ class StreamEvent:
     content: str
     metadata: dict[str, Any] | None = field(default=None)
     internal: bool = field(default=False)
+
+    def to_json(self) -> str:
+        """Serialize this event to a JSON string."""
+        return json.dumps(dataclasses.asdict(self), default=str)
 
 
 class Channel(Protocol):

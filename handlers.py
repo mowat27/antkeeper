@@ -12,7 +12,7 @@ from antkeeper.core.domain import State
 from antkeeper.core.app import App, run_workflow
 from antkeeper.git.worktrees import Worktree, git_worktree
 from antkeeper.handlers.claude_code.factories import cc_handler
-from antkeeper.llm.claude_code import collect_result, run_prompt
+from antkeeper.llm.claude_code import run_prompt
 
 
 # --- Steps (factory-built) ---
@@ -88,15 +88,19 @@ def healthcheck(runner: Runner, state: State) -> State:
         Updated state with ``poem`` set to the LLM's response text.
     """
     runner.report_progress("Running healthcheck")
-    response, _events = collect_result(run_prompt(
+    stream = run_prompt(
         "Write a short poem about agentic coding",
         runner.logger,
         model=state.get("model"),
-    ))
-    runner.logger.info(f"healthcheck response: {response}")
+    )
+    result_text = ""
+    for event in stream:
+        runner.channel.report(runner.id, event)
+        if event.type == "result" and not event.internal:
+            result_text = event.content
+    runner.logger.info(f"healthcheck response: {result_text}")
     runner.report_progress("Healthcheck complete")
-    runner.report_progress(response)
-    return {**state, "poem": response}
+    return {**state, "poem": result_text}
 
 
 # --- Shared workflow constants ---
