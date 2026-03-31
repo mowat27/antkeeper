@@ -183,10 +183,17 @@ architecture:
     (3) ClaudeCodeAgent.prompt() — child span "antkeeper.llm.call" with
     prompt_length (before), session_id/duration_ms/input_tokens/output_tokens/
     total_cost_usd/model (after). All spans record exceptions and set ERROR
-    status on failure. TracerProvider is configured programmatically at startup
-    (not via opentelemetry-instrument). No TracerProvider setup in library code —
-    entry points (cli.py, server.py) are responsible. OTel packages are core
-    dependencies.
+    status on failure.
+    TracerProvider is NOT configured in library code — the library only calls
+    trace.get_tracer("antkeeper"), which returns a no-op tracer by default.
+    To export spans, wrap the command with opentelemetry-instrument (from the
+    opentelemetry-distro package), which auto-configures TracerProvider, exporter,
+    and span processors from OTEL_* env vars. OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+    must be set to http/protobuf (only the HTTP exporter is installed; gRPC is not).
+    OTel packages are core dependencies.
+    The bash wrapper that sets Axiom exporter env vars and invokes
+    opentelemetry-instrument is external to antkeeper — it is a global tool used
+    across multiple projects, not an antkeeper-specific concern.
     Cross-trace correlation: CC subprocesses run in separate processes with their
     own TracerProviders and separate trace_ids. Context is injected into the
     subprocess environment via opentelemetry.propagate.inject() in
@@ -194,6 +201,10 @@ architecture:
     spans. The join key between antkeeper and CC traces is session_id — the
     antkeeper.llm.call span carries session_id as a span attribute, and CC events
     in Axiom carry attributes.session.id with the same value.
+    CC subprocess resource attribute propagation (OTEL_RESOURCE_ATTRIBUTES) is
+    not implemented in antkeeper. This was evaluated and deferred — until CC
+    honours traceparent, adding resource attrs to CC spans is cosmetic (the
+    session_id join key is sufficient for drill-down).
 
   state_persistence: >
     Automatic JSON-based state snapshots. Runner writes state to
@@ -542,39 +553,14 @@ handler_factories:
         yields extraction events with internal=True after original result event.
         Non-result events pass through. model_opts = (_EXTRACTION_MODEL, ["--max-turns", "1"]).
 
-    behavior:
-      label_derivation: "Default label = first token of command with leading slash stripped."
-      handler.__name__: "Set to label for framework introspection (app.add_handler() compatible)."
-      interpolation: >
-        $var placeholders substituted from state via regex. ${var} NOT interpolated.
-        Missing state key -> KeyError -> runner.fail().
-      fire_and_forget_mode: >
-        state_updates None/empty: streams agent.prompt() through empty pipeline,
-        forwards all events directly to runner.channel.report(). Returns state unchanged.
-      extraction_mode: >
-        state_updates non-empty: pipeline with _extraction_middleware (haiku, --max-turns 1).
-        All events forwarded directly to runner.channel.report(). Internal result events
-        parsed via extract_json. Extracted fields merged into state. Missing field -> KeyError -> runner.fail().
-      streaming: >
-        Handler drains pipeline event-by-event, forwarding all events to runner.channel.report().
-        Verbosity filtering is now the channel's responsibility (verbose param on CliChannel,
-        ApiChannel, SlackChannel). Pipeline closed in finally.
-      model_resolution: >
-        Primary: model if not None else state.get("model"). Factory model beats state model.
-        Extraction: always haiku with --max-turns 1.
-      error_handling: >
-        KeyError, AgentExecutionError, ValueError all route to runner.fail("{label} failed: {error}").
-      env_handling: >
-        env provided -> handler body executes inside _app_env(env). Handler env wins over
-        App-level env. Static str only. env=None is a no-op.
-      opts_handling: >
-        opts forwarded verbatim to ClaudeCodeAgent. None (default) = no extra flags.
-        opts=[] forwarded as-is. Handler opts are NOT passed to the extraction step;
-        extraction always uses its own hardcoded ["--max-turns", "1"].
-      yolo_handling: >
-        yolo=True (default) passes --dangerously-skip-permissions to ClaudeCodeAgent.
-        yolo=False omits the flag. Backward compatible: all existing calls default to True.
-      progress: "Reports Running {label} before and {label} complete after."
+    behavior: >
+      label = first token of command, slash stripped. handler.__name__ = label.
+      $var interpolated from state (${var} not interpolated); missing key -> runner.fail().
+      fire-and-forget: empty pipeline, all events forwarded, state unchanged.
+      extraction: _extraction_middleware (haiku + --max-turns 1), internal events spliced after result,
+      extracted fields merged into state. model: factory beats state['model']; extraction always haiku.
+      env: handler body in _app_env(env), handler wins over App-level, static str only.
+      opts: primary agent only (not extraction). yolo=True default. Errors -> runner.fail().
   handlers_package_exports:
     file: src/antkeeper/handlers/claude_code/__init__.py
     purpose: >
@@ -620,54 +606,13 @@ handler_factories:
       _Validator:
         kind: type alias
         definition: "Callable[[State], ValidationResult]"
-    private_functions:
-      _bash_validator: >
-        _bash_validator(script_path: str) -> _Validator.
-        Wraps a bash script as a validator. Serializes state to JSON, passes on stdin.
-        Script must write {"success": bool, "feedback": "..."} JSON to stdout.
-        Non-zero exit or invalid JSON raises RuntimeError immediately (no retry).
-      _state_diff: >
-        _state_diff(before: State, after: State) -> str.
-        Produces a concise human-readable diff: keys added/changed/removed.
-        Values truncated at 200 chars. Used to populate the progress log on each attempt.
-      _append_log: >
-        _append_log(log_path: str, content: str) -> None.
-        Appends content to the progress log file.
-    behavior:
-      label_resolution: >
-        label defaults to handler.__name__ when None. __name__ of returned wrapper is set to
-        the resolved label.
-      validator_resolution: >
-        When validator is a str, wrapped with _bash_validator() at factory time (once).
-        Otherwise used directly.
-      log_file: >
-        Created at {log_dir}/ralph-{label}-{runner.id}.log. log_dir resolved from
-        runner.app.log_dir (callable or string). os.makedirs(log_dir, exist_ok=True).
-      retry_loop: >
-        Runs max_retries + 1 total attempts (default 4). On retries (attempt > 0), reads
-        the progress log and prepends prior-attempts context to the original prompt via the
-        augmented prompt format. State passed to handler is never mutated in place.
-      prompt_augmentation_format: |
-        Previous attempts have not passed validation. Here is the history:
-
-        <prior_attempts>
-        {progress_log_content}
-        </prior_attempts>
-
-        Please address the feedback and try again.
-
-        {original_prompt}
-      on_success: >
-        Returns {**result_state, prompt_key: original_prompt} — original prompt restored.
-      on_exhaustion: >
-        runner.fail(f"ralph {label}: validation failed after {total_attempts} attempts")
-        raises WorkflowFailedError.
-      exception_propagation: >
-        Handler and validator exceptions propagate immediately without retry.
-    progress_log_format: >
-      Plain text, append-only. Entries separated by --- delimiter. Each entry contains:
-      attempt number, state diff (added/changed/removed keys, values truncated to 200 chars),
-      validation result (PASSED or FAILED + feedback).
+    behavior: >
+      label defaults to handler.__name__. str validator wrapped with _bash_validator at factory time
+      (bash script: state JSON on stdin, {"success": bool, "feedback": str} on stdout).
+      max_retries+1 total attempts (default 4). Progress log: {log_dir}/ralph-{label}-{runner.id}.log
+      (plain text, append-only, --- delimited; each entry has attempt#, state diff, PASSED/FAILED).
+      On retry: reads log, prepends prior-attempts context to prompt. On success: restores original prompt.
+      On exhaustion: runner.fail(). Handler/validator exceptions propagate immediately (no retry).
 
 channel_implementations:
   CliChannel:
@@ -733,12 +678,6 @@ cli_entry_point:
         If prompt_files given, reads each via Path.read_text() and concatenates
         into state['prompt']. If no files and stdin is piped (!sys.stdin.isatty()),
         reads stdin into state['prompt']. If neither, no prompt is set.
-      flow: >
-        1. parse_state_pairs() splits key=val strings into dict
-        2. If prompt_files: reads and concatenates into state['prompt']
-        3. Else if stdin piped: reads stdin into state['prompt']
-        4. Merges --model into state if provided
-        5. Delegates to _run_workflow_cli(agents_file, workflow_name, state)
       error_handling:
         - "FileNotFoundError -> agents file not found"
         - "AttributeError -> agents file has no 'app'"
@@ -886,70 +825,13 @@ http_modules:
       deduplicates app_mention + message events.
 
 data_flow:
-  cli_happy_path:
-    - "CLI parses args -> loads agents file -> gets App"
-    - "Builds CliChannel(workflow_name, initial_state)"
-    - "Runner(app, channel).run() — creates log file, generates run id"
-    - "Runner merges initial_state + {run_id, workflow_name}"
-    - "Handler(runner, state) -> new State"
-    - "For composites: run_workflow folds state through sub-handlers"
-    - "Result state printed to stdout"
-  api_happy_path:
-    - "POST /webhook with {workflow_name, initial_state} JSON body"
-    - "Server validates workflow exists via app.get_handler()"
-    - "Creates ApiChannel(workflow_name, initial_state)"
-    - "Creates Runner(app, channel) — generates run_id"
-    - "Schedules run_workflow_background(runner) as FastAPI background task"
-    - "Returns {run_id} JSON response immediately (200)"
-    - "Background task calls runner.run() -> workflow executes asynchronously"
-    - "Progress/error output goes to Uvicorn logs (stdout/stderr)"
-  llm_path:
-    - "cc_handler factory builds handler with command, state_updates, label, model captured in closure"
-    - "Handler interpolates $var placeholders from state via regex"
-    - "Step 1: Calls run_prompt(interpolated_command, runner.logger, model=primary_model)"
-    - "run_prompt creates ClaudeCodeAgent(model=model, yolo=True), calls agent.prompt()"
-    - "Agent runs subprocess `claude --output-format stream-json -p` -> reads JSONL line-by-line, yields StreamEvent instances"
-    - "If fire-and-forget (no state_updates): returns state unchanged"
-    - "If extraction mode (state_updates non-empty): Step 2 — calls run_prompt(_extraction_prompt(response, required_fields=state_updates), runner.logger, model='haiku')"
-    - "extract_json parses extraction response, picks only listed fields, merges into state"
-  ralph_retry_path:
-    - "ralph() wraps a handler at factory time, resolving label and validator type"
-    - "On each attempt: runner.report_progress -> handler(runner, state) -> validator(result_state)"
-    - "On failure: state diff + feedback appended to {log_dir}/ralph-{label}-{runner.id}.log"
-    - "On retry (attempt > 0): reads log, builds augmented prompt, updates state before calling handler"
-    - "On success: returns {**result_state, prompt_key: original_prompt}"
-    - "On exhaustion: runner.fail() raises WorkflowFailedError"
-  worktree_iso_path:
-    - "sdlc_iso calls derive_feature to get feature_type and slug"
-    - "Creates Worktree(base_dir=runner.app.worktree_dir, name='{timestamp}-{run_id}')"
-    - "Enters git_worktree(wt, create=True, branch='{feature_type}/{slug}', remove=False)"
-    - "Inside worktree: runs specify -> implement -> document via run_workflow; cwd restored on exit"
-    - "Returns state with worktree_path and branch_name added"
-  slack_happy_path:
-    - "User @mentions bot in Slack channel with workflow name"
-    - "POST /slack_event validates SLACK_BOT_TOKEN + SLACK_BOT_USER_ID (422 if missing, url_verification exempt)"
-    - "POST /slack_event receives event_callback, bot filters + mention detection"
-    - "Creates PendingMessage, adds thumbsup reaction, starts debounce timer"
-    - "User can edit message or reply in thread — timer resets, text/files accumulated"
-    - "Timer fires after cooldown — posts 'Processing your request...' in thread"
-    - "Validates workflow exists, builds initial_state {prompt, slack_user, files?}"
-    - "Creates SlackChannel(workflow_name, initial_state, token, channel_id, thread_ts)"
-    - "Creates Runner(app, channel), runs via asyncio.to_thread(run_workflow_background)"
-    - "Handler calls runner.report_progress() -> SlackChannel posts to Slack thread"
-  error_path:
-    - "Unknown handler -> ValueError from App.get_handler"
-    - "Handler calls runner.fail(msg) -> logs, raises WorkflowFailedError"
-    - "CLI catches WorkflowFailedError -> prints to stderr, exit(1)"
-    - "API catches WorkflowFailedError -> logs only (already logged by Runner), continues serving"
-    - "Handler calls runner.report_error(msg) -> logs, channel.report_error -> stderr"
-    - "Agent subprocess failure -> AgentExecutionError propagates"
-    - "Workflow exception -> Runner logs error, re-raises"
-    - "Worktree creation failure -> WorktreeError propagates"
-    - "Entering non-existent worktree (create=False) -> WorktreeError"
-    - "Git command failure -> GitCommandError propagates (from execute())"
-    - "API unknown workflow -> HTTPException 404 before creating Runner"
-    - "API invalid request body -> FastAPI auto-returns 422"
-    - "Slack missing env vars -> HTTPException 422 from route handler (url_verification exempt)"
+  cli: "load_app -> CliChannel(workflow_name, state) -> Runner.run() -> handler(runner, state) -> State"
+  api: "POST /webhook -> validate handler -> ApiChannel+Runner -> background task -> run() async; returns run_id immediately"
+  llm: "cc_handler interpolates $vars -> run_prompt -> ClaudeCodeAgent subprocess -> JSONL StreamEvents; extraction mode adds haiku second pass"
+  ralph: "each attempt: handler -> validator; failure appends to log; retry augments prompt with prior-attempts context"
+  worktree: "git_worktree(create=True, branch=feature/slug) -> run_workflow inside worktree -> cwd restored"
+  slack: "@mention -> PendingMessage + debounce timer; edits/replies accumulate; timer fires -> SlackChannel+Runner"
+  errors: "runner.fail() -> WorkflowFailedError; CLI exits 1; API continues serving; unknown handler -> 404; worktree/git failures propagate"
 
 testing_design:
   philosophy: >
@@ -979,131 +861,44 @@ testing_design:
   test_structure: >
     Tests organized into subdirectories mirroring src layout.
   test_files:
-    - tests/core/test_app.py — App constructor tests (handlers param, add_handler, env param storage and defaults)
-    - tests/core/test_workflows.py — core engine paths + TestAppEnvironment (env var lifecycle, callable env values) + TestWorkflowProgress (_progress tracking, initial persist before first step, no _progress for direct handlers) + TestCallableLogDir (callable log_dir)
-    - tests/core/test_logging.py — per-run file logging, App config (log_dir, worktree_dir, state_dir defaults)
-    - tests/core/test_state_persistence.py — state file creation, naming format, content, per-step persistence, log/state filename correlation
-    - tests/channels/test_cli_channel.py — CliChannel initial_state and attribute tests
-    - tests/channels/test_api_channel.py — ApiChannel type, initial_state, stdout/stderr reporting
-    - tests/test_cli.py — Click CLI: TestParseStatePairs (empty, valid, invalid), TestRunCommand (agent loading, prompt file/stdin, state/model), TestResumeCommand, TestServerCommand, TestInitCommand
-    - tests/core/test_resume.py — TestLoadStateByRunId (finds matching file, raises FileNotFoundError when absent, picks correct file among multiple)
-    - tests/test_server.py — FastAPI webhook endpoint (returns run_id, 404 for unknown workflow, 422 for invalid body)
-    - tests/channels/test_slack_channel.py — SlackChannel type, initial_state, report_progress/error posts, HTTP failure resilience
-    - tests/test_slack_server.py — Slack event endpoint (url_verification, bot filter, mention, edit, reply, delete, timer dispatch, unknown workflow, dedup, env var validation)
-    - tests/llm/test_claude_code_agent.py — ClaudeCodeAgent: subprocess delegation via Popen, model/yolo/opts flags, missing binary -> AgentExecutionError, stream-json output format, JSONL line parsing via _parse_jsonl_line (assistant/system/result/rate_limit/unknown types), result event metadata/telemetry, non-zero exit after stream raises AgentExecutionError
-    - tests/llm/test_middleware.py — build_pipeline (identity, single mw, sequential order), _extraction_middleware (intercepts result, splices internal events, passes non-result events, error propagation)
+    - tests/core/test_app.py — App constructor, add_handler, env storage
+    - tests/core/test_workflows.py — engine paths, env var lifecycle, _progress tracking, callable log_dir
+    - tests/core/test_logging.py — per-run file logging, App config defaults
+    - tests/core/test_state_persistence.py — state file creation, naming, per-step persistence
+    - tests/core/test_resume.py — _load_state_by_run_id: finds file, raises on missing
+    - tests/core/test_loader.py — load_app: happy path, FileNotFoundError, AttributeError
+    - tests/channels/test_cli_channel.py — CliChannel initial_state, attributes
+    - tests/channels/test_api_channel.py — ApiChannel type, stdout/stderr routing
+    - tests/channels/test_slack_channel.py — SlackChannel report, HTTP failure resilience
+    - tests/test_cli.py — Click CLI: parse_state_pairs, run/resume/server/init subcommands
+    - tests/test_server.py — FastAPI webhook: run_id, 404 unknown workflow, 422 invalid body
+    - tests/test_slack_server.py — Slack event endpoint: url_verification, mention, edit, reply, delete, debounce, env var guard
+    - tests/llm/test_claude_code_agent.py — ClaudeCodeAgent subprocess, model/yolo/opts, JSONL parsing, error types
+    - tests/llm/test_middleware.py — build_pipeline, _extraction_middleware intercepts result, splices internal events
+    - tests/llm/test_run_prompt.py — run_prompt delegates to ClaudeCodeAgent(yolo=True)
     - tests/helpers/test_extract_json.py — JSON extraction from LLM responses
-    - tests/helpers/test_timestamps.py — make_timestamp format, make_log_dir returns callable, produces correct path, timestamp captured at call time
-    - tests/git/test_worktree.py — Worktree class (path, exists, create, create+branch, remove, errors)
-    - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
-    - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
-    - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline, extraction mode (haiku + max-turns 1), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling (KeyError/AgentExecutionError/ValueError -> runner.fail), handler-level env (set/restore), opts forwarded to agent (empty list as-is, extraction isolation), yolo default True + yolo=False forwarding; all events forwarded to channel (verbosity is channel's concern)
-    - tests/handlers/test_ralph.py — ralph: happy path (pass first attempt, pass after retries, original prompt restored, custom prompt_key), retry exhaustion (max_retries=2 -> 3 attempts, max_retries=0 -> 1 attempt, default max_retries=3 -> 4 attempts, WorkflowFailedError raised), exception propagation (handler/validator exceptions propagate immediately without retry), progress log (file created, feedback in log, retry prompt augmented with prior_attempts context), label (defaults to handler.__name__, explicit label used in log filename), bash validator (success/failure/non-zero exit error propagation)
-    - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
-    - tests/llm/test_run_prompt.py — run_prompt: returns Iterator[StreamEvent], delegates to ClaudeCodeAgent with yolo=True, passes model/opts
-    - tests/core/test_loader.py — TestLoadApp: returns app object, FileNotFoundError on missing file, AttributeError on missing app attr
-    - tests/helpers/test_github.py — TestFetchGhIssue (gh subprocess, errors), TestBuildIssuesPrompt (single/multi issue format)
+    - tests/helpers/test_timestamps.py — make_timestamp, make_log_dir callable
+    - tests/helpers/test_github.py — fetch_gh_issue, build_issues_prompt
+    - tests/git/test_worktree.py — Worktree create/remove/errors
+    - tests/git/test_context.py — git_worktree cwd save/restore, create/remove
+    - tests/git/test_core.py — execute() stdout, GitCommandError on failure
+    - tests/git/test_branch.py — current() branch, detached HEAD
+    - tests/handlers/test_factories.py — cc_handler label, pipeline, extraction, interpolation, model/env/opts/yolo
+    - tests/handlers/test_ralph.py — ralph retry loop, exhaustion, exception propagation, progress log, bash validator
+    - tests/test_tracing.py — OTel: in-memory exporter, root/step/llm span attributes and error recording
 
 key_design_decisions:
-  - >
-    ralph() is a handler wrapper factory with zero LLM dependencies. Any callable
-    matching (Runner, State) -> State with a __name__ attribute can be wrapped.
-    Validators are Python callables or bash scripts (stdin/stdout JSON contract).
-    Retry loop accumulates feedback in a per-run progress log file (separate from
-    the runner log) and augments the prompt with prior-attempts context on retries.
-    Original prompt value is always restored in the returned state on success.
-    WorkflowFailedError raised via runner.fail() on exhaustion. Exceptions from handler
-    or validator propagate immediately without retry.
-  - >
-    Channel is a Protocol, not an ABC. Extensions use structural subtyping.
-    Channel.report(run_id, StreamEvent) is the single reporting method; the previous
-    report_progress/report_error pair was unified into report() with event.type routing.
-  - >
-    Handlers receive (runner, state) and return State. Runner is the only
-    framework object a handler interacts with.
-  - >
-    State is always a new dict (spread pattern). No mutation of incoming state.
-    State is automatically persisted to JSON files during workflow execution
-    (before, after each step, and on completion) but is never shared between
-    workflow runs — each run writes its own isolated state file.
-  - >
-    run_workflow enables composition without inheritance or a DAG scheduler.
-    Handlers that orchestrate other handlers just call run_workflow with a
-    step list.
-  - >
-    The CLI dynamically loads user code via importlib. The agents file must
-    export a module-level `app` object.
-  - >
-    Agent is a Protocol, like Channel. New LLM backends implement prompt(str)->str.
-    ClaudeCodeAgent delegates to the `claude` CLI via subprocess.
-  - >
-    CLI uses positional args for prompt input. Prompt files (one or many)
-    are passed as positional args after workflow_name; their contents are
-    concatenated into state['prompt']. If no files and stdin is piped,
-    stdin is read. --model sets state['model']. File/stdin resolution
-    happens in cli.py before reaching the channel. Handlers read from
-    state, keeping the Runner/Channel layer unaware of LLM concerns.
-  - >
-    Errors propagate by default. Handler errors (missing keys), runtime issues
-    (failed connections), and coding errors (naming mistakes) all propagate.
-    Only edge validations (e.g. missing CLI params) are caught and reported
-    when a stack trace would add no value.
-  - >
-    Per-run file logging. Each Runner creates an isolated log file. No console
-    logging from the framework. Module-level loggers provide debug tracing.
-  - >
-    cc_handler factory: streaming pipeline; all events forwarded to runner.channel.report() —
-    verbosity filtering is the channel's concern (verbose param on CliChannel/ApiChannel/SlackChannel).
-    Fire-and-forget (no state_updates) = empty pipeline. Extraction mode = _extraction_middleware
-    (haiku + --max-turns 1) splices internal extraction events after result. Factory model overrides
-    state['model']; extraction always uses haiku. opts to primary agent only. yolo=True default.
-    Handler __name__ set to label. See handler_factories section for full detail.
-  - >
-    Git worktree isolation. sdlc_iso creates a worktree per run on
-    {feature_type}/{slug}, enabling parallel feature dev without cwd/branch
-    conflicts. Worktrees kept after completion (remove=False) for inspection.
-    App.worktree_dir configures base directory (default "trees/").
-  - >
-    BREAKING: Runner.fail() raises WorkflowFailedError instead of exit(1).
-    This decouples workflow failure from process termination, enabling both
-    CLI (which exits) and API (which continues serving) to handle failures
-    appropriately. CLI catches WorkflowFailedError and exits 1. API server
-    catches it in background task and continues serving other requests.
-  - >
-    Dual execution model: CLI and HTTP API. CliChannel and ApiChannel are nearly
-    identical (stdout/stderr) but have different type identifiers. POST /webhook
-    runs workflows in FastAPI BackgroundTasks (same process, scales with workers).
-  - >
-    Server factory pattern: create_app() loads agents file, returns configured
-    FastAPI. Tests call create_app() with custom agents file. app = create_app()
-    module-level for uvicorn. --agents-file propagated via ANTKEEPER_HANDLERS_FILE.
-  - >
-    Server as thin orchestrator. server.py defines routes inline and
-    delegates to http/ package: handle_webhook (webhook.py) and
-    SlackEventProcessor.handle_event (slack_events.py). Background
-    task helper run_workflow_background lives in http/__init__.py.
-    No setup_*_routes functions — server owns route definitions.
-  - >
-    Slack integration uses debounce pattern via SlackEventProcessor class
-    (not closures). Bot mentions create a PendingMessage with a cooldown
-    timer. Edits and thread replies reset the timer and accumulate
-    text/files. Timer fire dispatches to the workflow handler. Pending
-    store is instance-scoped on the processor for test isolation.
-  - >
-    SlackChannel uses sync httpx (handlers in threadpool); server endpoint uses
-    async httpx (event loop). Independent clients. Thread context (channel_id,
-    thread_ts) captured at construction from the @mention event.
-  - >
-    Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS,
-    ANTKEEPER_SLACK_VERBOSE) read from environment at request time. python-dotenv
-    loads .env file in create_app(). .env is gitignored.
-  - >
-    App-level env injection via App(env={...}). Values are static or callables(runner);
-    resolved by Runner.run() before _app_env. App.log_dir also supports callables.
-    Not thread-safe (os.environ is process-global); acceptable for single-threaded model.
-  - >
-    Automatic state persistence: Runner writes JSON state at 4 lifecycle points
-    (before workflow, _progress init, after each step, after completion). State
-    and log files share <timestamp>-<id> base name. Enables progress polling
-    without handler-side persistence logic. See architecture.state_persistence.
+  - "Reducer pattern: handlers receive (runner, state) -> State. State is always a new dict (spread), never mutated, never shared between runs."
+  - "Channel and Agent are Protocols (structural subtyping, not ABCs). Channel.report(run_id, StreamEvent) is the single I/O method."
+  - "runner.fail() raises WorkflowFailedError (not exit). CLI catches and exits 1; API background task catches and continues serving."
+  - "run_workflow enables composition without DAG: handlers call run_workflow with a step list."
+  - "CLI loads user code dynamically via importlib (load_app); agents file must export `app`. Prompt from files or piped stdin into state['prompt']."
+  - "cc_handler: verbosity filtering is the channel's concern, not the factory. All events forwarded unconditionally to runner.channel.report()."
+  - "ralph() wraps any (Runner,State)->State handler with __name__. Zero LLM dependencies. Exceptions propagate immediately (no retry)."
+  - "Git worktree isolation: one worktree per run on feature/slug branch. App.worktree_dir = 'trees/' default."
+  - "Server factory: create_app() loads agents file, returns FastAPI. Routes defined inline in server.py; logic delegated to http/ package."
+  - "Slack: debounce via SlackEventProcessor (instance-scoped pending store). SlackChannel uses sync httpx; server endpoint uses async httpx."
+  - "Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS, ANTKEEPER_SLACK_VERBOSE) read at request time via os.environ."
+  - "App(env={...}): static or callable(runner) values; resolved per run. Not thread-safe (os.environ global); acceptable for single-threaded model."
+  - "OTel: library never configures TracerProvider. Use opentelemetry-instrument for auto-config. Bash wrapper (Axiom creds + opentelemetry-instrument) is external/global, not antkeeper-owned."
+  - "CC subprocess OTEL_RESOURCE_ATTRIBUTES propagation deferred: session_id join key is sufficient until CC honours traceparent."
