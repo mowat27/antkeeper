@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-31 (branch: refactor/channel-verbose-control)
+# Last validated: 2026-03-31 (branch: feature/ralph-retry-wrapper)
 
 overview:
   name: antkeeper
@@ -95,13 +95,14 @@ architecture:
     - name: handlers
       path: src/antkeeper/handlers/
       responsibility: >
-        Pre-built handler packages. Currently contains the claude_code subpackage,
-        which provides the cc_handler factory for building LLM-backed workflow handlers.
-        Users build their own App and register handlers via add_handler() or @app.handler.
+        Pre-built handler packages. Contains the claude_code subpackage (cc_handler factory)
+        and the ralph module (retry-with-validation wrapper). Users build their own App and
+        register handlers via add_handler() or @app.handler.
       modules:
-        - __init__.py
+        - __init__.py  # Re-exports ralph and ValidationResult from handlers.ralph
         - claude_code/__init__.py  # Re-exports cc_handler from factories.py
         - claude_code/factories.py  # cc_handler factory (fire-and-forget and JSON modes)
+        - ralph.py  # ralph() factory and ValidationResult dataclass
 
     - name: helpers
       path: src/antkeeper/helpers/
@@ -575,6 +576,92 @@ handler_factories:
       or the @app.handler decorator.
     exports: ["cc_handler"]
 
+  handlers_init_exports:
+    file: src/antkeeper/handlers/__init__.py
+    purpose: >
+      Top-level re-exports for the handlers package. Exposes ralph and ValidationResult
+      so callers can import from antkeeper.handlers directly.
+    exports: ["ralph", "ValidationResult"]
+
+  ralph:
+    file: src/antkeeper/handlers/ralph.py
+    signature: |
+      ralph(
+          handler: _NamedHandler,
+          *,
+          validator: _Validator | str,
+          max_retries: int = 3,
+          prompt_key: str = "prompt",
+          label: str | None = None,
+      ) -> _NamedHandler
+    returns: Handler callable with __name__ set to resolved label
+    responsibility: >
+      Factory that wraps any handler with a retry-validation loop. On each attempt the
+      inner handler is called, then the validator is invoked. On validation failure,
+      feedback is appended to a progress log and the prompt is augmented with prior-attempts
+      context before the next attempt. On exhaustion, runner.fail() raises WorkflowFailedError.
+      Has zero LLM dependencies — wraps any callable matching (Runner, State) -> State with __name__.
+    types:
+      ValidationResult:
+        kind: frozen dataclass
+        fields:
+          - "success: bool"
+          - "feedback: str"
+      _NamedHandler:
+        kind: Protocol
+        description: "A handler callable with __name__: str attribute"
+      _Validator:
+        kind: type alias
+        definition: "Callable[[State], ValidationResult]"
+    private_functions:
+      _bash_validator: >
+        _bash_validator(script_path: str) -> _Validator.
+        Wraps a bash script as a validator. Serializes state to JSON, passes on stdin.
+        Script must write {"success": bool, "feedback": "..."} JSON to stdout.
+        Non-zero exit or invalid JSON raises RuntimeError immediately (no retry).
+      _state_diff: >
+        _state_diff(before: State, after: State) -> str.
+        Produces a concise human-readable diff: keys added/changed/removed.
+        Values truncated at 200 chars. Used to populate the progress log on each attempt.
+      _append_log: >
+        _append_log(log_path: str, content: str) -> None.
+        Appends content to the progress log file.
+    behavior:
+      label_resolution: >
+        label defaults to handler.__name__ when None. __name__ of returned wrapper is set to
+        the resolved label.
+      validator_resolution: >
+        When validator is a str, wrapped with _bash_validator() at factory time (once).
+        Otherwise used directly.
+      log_file: >
+        Created at {log_dir}/ralph-{label}-{runner.id}.log. log_dir resolved from
+        runner.app.log_dir (callable or string). os.makedirs(log_dir, exist_ok=True).
+      retry_loop: >
+        Runs max_retries + 1 total attempts (default 4). On retries (attempt > 0), reads
+        the progress log and prepends prior-attempts context to the original prompt via the
+        augmented prompt format. State passed to handler is never mutated in place.
+      prompt_augmentation_format: |
+        Previous attempts have not passed validation. Here is the history:
+
+        <prior_attempts>
+        {progress_log_content}
+        </prior_attempts>
+
+        Please address the feedback and try again.
+
+        {original_prompt}
+      on_success: >
+        Returns {**result_state, prompt_key: original_prompt} — original prompt restored.
+      on_exhaustion: >
+        runner.fail(f"ralph {label}: validation failed after {total_attempts} attempts")
+        raises WorkflowFailedError.
+      exception_propagation: >
+        Handler and validator exceptions propagate immediately without retry.
+    progress_log_format: >
+      Plain text, append-only. Entries separated by --- delimiter. Each entry contains:
+      attempt number, state diff (added/changed/removed keys, values truncated to 200 chars),
+      validation result (PASSED or FAILED + feedback).
+
 channel_implementations:
   CliChannel:
     file: src/antkeeper/channels/cli.py
@@ -818,6 +905,13 @@ data_flow:
     - "If fire-and-forget (no state_updates): returns state unchanged"
     - "If extraction mode (state_updates non-empty): Step 2 — calls run_prompt(_extraction_prompt(response, required_fields=state_updates), runner.logger, model='haiku')"
     - "extract_json parses extraction response, picks only listed fields, merges into state"
+  ralph_retry_path:
+    - "ralph() wraps a handler at factory time, resolving label and validator type"
+    - "On each attempt: runner.report_progress -> handler(runner, state) -> validator(result_state)"
+    - "On failure: state diff + feedback appended to {log_dir}/ralph-{label}-{runner.id}.log"
+    - "On retry (attempt > 0): reads log, builds augmented prompt, updates state before calling handler"
+    - "On success: returns {**result_state, prompt_key: original_prompt}"
+    - "On exhaustion: runner.fail() raises WorkflowFailedError"
   worktree_iso_path:
     - "sdlc_iso calls derive_feature to get feature_type and slug"
     - "Creates Worktree(base_dir=runner.app.worktree_dir, name='{timestamp}-{run_id}')"
@@ -898,12 +992,22 @@ testing_design:
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
     - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline, extraction mode (haiku + max-turns 1), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling (KeyError/AgentExecutionError/ValueError -> runner.fail), handler-level env (set/restore), opts forwarded to agent (empty list as-is, extraction isolation), yolo default True + yolo=False forwarding; all events forwarded to channel (verbosity is channel's concern)
+    - tests/handlers/test_ralph.py — ralph: happy path (pass first attempt, pass after retries, original prompt restored, custom prompt_key), retry exhaustion (max_retries=2 -> 3 attempts, max_retries=0 -> 1 attempt, default max_retries=3 -> 4 attempts, WorkflowFailedError raised), exception propagation (handler/validator exceptions propagate immediately without retry), progress log (file created, feedback in log, retry prompt augmented with prior_attempts context), label (defaults to handler.__name__, explicit label used in log filename), bash validator (success/failure/non-zero exit error propagation)
     - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
     - tests/llm/test_run_prompt.py — run_prompt: returns Iterator[StreamEvent], delegates to ClaudeCodeAgent with yolo=True, passes model/opts
     - tests/core/test_loader.py — TestLoadApp: returns app object, FileNotFoundError on missing file, AttributeError on missing app attr
     - tests/helpers/test_github.py — TestFetchGhIssue (gh subprocess, errors), TestBuildIssuesPrompt (single/multi issue format)
 
 key_design_decisions:
+  - >
+    ralph() is a handler wrapper factory with zero LLM dependencies. Any callable
+    matching (Runner, State) -> State with a __name__ attribute can be wrapped.
+    Validators are Python callables or bash scripts (stdin/stdout JSON contract).
+    Retry loop accumulates feedback in a per-run progress log file (separate from
+    the runner log) and augments the prompt with prior-attempts context on retries.
+    Original prompt value is always restored in the returned state on success.
+    WorkflowFailedError raised via runner.fail() on exhaustion. Exceptions from handler
+    or validator propagate immediately without retry.
   - >
     Channel is a Protocol, not an ABC. Extensions use structural subtyping.
     Channel.report(run_id, StreamEvent) is the single reporting method; the previous

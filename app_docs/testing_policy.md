@@ -80,7 +80,8 @@ tests/
 │   └── test_slack_channel.py  # SlackChannel unit tests
 ├── handlers/          # Tests for src/antkeeper/handlers/
 │   ├── test_claude_code.py    # Claude Code handler registration tests
-│   └── test_factories.py      # cc_handler factory unit tests
+│   ├── test_factories.py      # cc_handler factory unit tests
+│   └── test_ralph.py          # ralph() retry-with-validation wrapper unit tests
 ├── helpers/           # Tests for src/antkeeper/helpers/
 │   ├── test_github.py         # fetch_gh_issue() and build_issues_prompt() unit tests
 │   └── test_timestamps.py     # make_timestamp() and make_log_dir() unit tests
@@ -467,6 +468,51 @@ For tests that verify pre-existing keys are restored (not deleted), set the key 
 Tests cover: env vars visible during execution, env restored after success, env restored after failure (WorkflowFailedError), pre-existing var overridden during execution and restored after, `env=None` is a no-op, env active during both extraction-mode `run_prompt` calls, and multiple env vars set and cleaned up together.
 
 Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), handler-level env (set during execution, restored after success/failure, noop for None, active across both extraction calls), and unconditional event forwarding to channel.
+
+### ralph Testing Patterns
+
+Tests for the `ralph()` retry-with-validation wrapper (`tests/handlers/test_ralph.py`) use `runner_factory()` with no custom `App`. All inner handlers and validators are simple callables defined in the test module. No LLM mocking is needed — ralph has zero LLM dependencies.
+
+**Happy path tests:**
+- `test_pass_on_first_attempt` — validator passes immediately; handler called once; result returned with original prompt intact
+- `test_pass_after_retries` — validator fails twice, passes on third attempt; handler called 3 times; original prompt restored in result
+- `test_original_prompt_restored` — handler modifies `prompt_key`; validator passes; returned state has original prompt value
+- `test_custom_prompt_key` — use `prompt_key="instruction"`; verify save/restore works on custom key
+
+**Retry exhaustion tests:**
+- `test_exhaustion_raises_workflow_failed` — validator always fails, `max_retries=2`; handler called 3 times; `WorkflowFailedError` raised
+- `test_max_retries_zero_single_attempt` — `max_retries=0`, validator fails; handler called once; `WorkflowFailedError` raised
+- `test_default_max_retries_is_three` — default `max_retries`; validator always fails; handler called 4 times; `WorkflowFailedError` raised
+
+**Exception propagation tests:**
+- `test_handler_exception_propagates` — inner handler raises `ValueError`; propagates immediately; no retry
+- `test_validator_exception_propagates` — validator raises `RuntimeError`; propagates immediately; no retry
+
+**Progress log tests:**
+- `test_progress_log_created` — after execution, file exists at `{log_dir}/ralph-{label}-{runner.id}.log`
+- `test_progress_log_contains_feedback` — validator fails with specific feedback, then passes; feedback string appears in log
+- `test_retry_prompt_augmented` — capture prompt seen by handler on retry; verify it contains `prior_attempts` context and the original prompt
+
+**Label tests:**
+- `test_label_defaults_to_handler_name` — no explicit label; `__name__` and log filename use `handler.__name__`
+- `test_explicit_label` — explicit label; `__name__` and log filename use the given label
+
+**Bash validator tests** (use `tmp_path` to create real executable scripts):
+- `test_bash_validator_success` — script outputs `{"success": true, "feedback": ""}`; validator passes
+- `test_bash_validator_failure` — script outputs `{"success": false, "feedback": "bad"}`; validator fails
+- `test_bash_validator_error_propagates` — script exits non-zero; `RuntimeError` propagates
+
+**Key pattern — resolving the log path in tests:**
+
+```python
+def _log_path(runner, label):
+    log_dir = runner.app.log_dir(runner) if callable(runner.app.log_dir) else runner.app.log_dir
+    return os.path.join(log_dir, f"ralph-{label}-{runner.id}.log")
+```
+
+This mirrors the logic inside `ralph` itself and works with both static and callable `log_dir` values.
+
+**No integration tests needed** — ralph is a pure handler wrapper with no external service dependencies.
 
 ### GitHub Helper Testing Patterns
 
