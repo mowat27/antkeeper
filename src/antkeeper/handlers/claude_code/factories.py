@@ -18,12 +18,6 @@ An optional ``env`` dict sets environment variables for the handler's
 execution only.  Handler-level env merges with App-level env using
 ``{**app_env, **handler_env}`` semantics (handler values win).
 
-An optional ``verbose`` flag controls how much of the event stream is
-forwarded to the channel.  When ``False`` (the default) only ``result``
-and ``error`` events with non-empty content are forwarded.  When ``True``
-every event with non-empty content is forwarded, which is useful for
-debugging or when intermediate progress messages are desired.
-
 An optional ``opts`` list passes arbitrary CLI flags to the underlying
 ``ClaudeCodeAgent``.  An optional ``yolo`` bool controls permission
 skipping (defaults to ``True`` for backward compatibility).
@@ -137,24 +131,6 @@ def _extraction_middleware(
     return middleware
 
 
-def _should_report(event: StreamEvent, verbose: bool) -> bool:
-    """Decide whether to forward an event to the channel.
-
-    Args:
-        event: The stream event to evaluate.
-        verbose: When ``True``, all events with non-empty content are forwarded.
-            When ``False``, only ``result`` and ``error`` events with content pass through.
-
-    Returns:
-        ``True`` if the event should be forwarded to the channel.
-    """
-    if not event.content:
-        return False
-    if verbose:
-        return True
-    return event.type in ("result", "error")
-
-
 class Handler(Protocol):
     """A handler callable with a ``__name__`` attribute.
 
@@ -178,7 +154,6 @@ def cc_handler(
     label: str | None = None,
     model: str | None = None,
     env: dict[str, str] | None = None,
-    verbose: bool = False,
     opts: list[str] | None = None,
     yolo: bool = True,
 ) -> Handler:
@@ -196,9 +171,6 @@ def cc_handler(
         env: Environment variables to set for this handler's execution only.
             Merges with App-level env (handler values win).  Restored after
             the handler completes, even on failure.
-        verbose: When ``True``, all events with non-empty content are forwarded
-            to the channel.  When ``False`` (default), only ``result`` and
-            ``error`` events with non-empty content are forwarded.
         opts: Extra CLI arguments forwarded verbatim to ``ClaudeCodeAgent``.
             When ``None`` (default), no extra flags are added.
         yolo: When ``True`` (default), passes ``--dangerously-skip-permissions``
@@ -261,8 +233,7 @@ def cc_handler(
                 extraction_result: dict | None = None
                 try:
                     for event in pipeline:
-                        if _should_report(event, verbose):
-                            runner.channel.report(runner.id, event)
+                        runner.channel.report(runner.id, event)
                         if event.type == "result" and event.internal:
                             extraction_result = extract_json(event.content)
                 finally:

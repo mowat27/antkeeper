@@ -97,3 +97,43 @@ class TestSlackChannel:
 
         channel = self._make_channel()
         channel.report("run1", StreamEvent(type="progress", content="step done"))  # should not raise
+
+    @patch("antkeeper.channels.slack.httpx.Client")
+    def test_verbose_false_suppresses_non_progress_non_error(self, mock_client_cls):
+        """Non-verbose mode suppresses assistant, tool, and result events."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        channel = self._make_channel()
+        for event_type in ("assistant", "tool", "result"):
+            channel.report("run1", StreamEvent(type=event_type, content="data"))
+        mock_client.post.assert_not_called()
+
+    @patch("antkeeper.channels.slack.httpx.Client")
+    def test_verbose_true_shows_all_events_as_plain_text(self, mock_client_cls):
+        """Verbose mode posts all event types as plain text (event.content)."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        channel = self._make_channel(verbose=True)
+        channel.report("run1", StreamEvent(type="assistant", content="thinking"))
+        call_args = mock_client.post.call_args
+        assert "thinking" in call_args.kwargs["json"]["text"]
+
+    @patch("antkeeper.channels.slack.httpx.Client")
+    def test_empty_content_suppressed(self, mock_client_cls):
+        """No Slack API call for events with empty content."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        channel = self._make_channel()
+        channel.report("run1", StreamEvent(type="progress", content=""))
+        mock_client.post.assert_not_called()
+
+    def test_verbose_defaults_to_false(self):
+        """Constructor defaults verbose to False."""
+        channel = self._make_channel()
+        assert channel.verbose is False

@@ -516,6 +516,90 @@ class TestResumeCommand:
             os.unlink(agents_path)
 
 
+class TestVerboseFlag:
+    """Tests for --verbose flag on run and resume commands."""
+
+    def test_run_verbose_flag_accepted(self):
+        """Test that --verbose flag is accepted by the run command."""
+        log_dir = tempfile.mkdtemp()
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App
+            from antkeeper.core.domain import State
+
+            app = App(log_dir="{log_dir}")
+
+            @app.handler
+            def add_1(runner, state: State) -> State:
+                return {{**state, "result": int(state["result"]) + 1}}
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "run",
+                "--agents-file", agents_path,
+                "--initial-state", "result=10",
+                "--verbose",
+                "add_1",
+            ])
+            assert result.exit_code == 0
+            assert "11" in result.output
+        finally:
+            os.unlink(agents_path)
+
+    def test_resume_verbose_flag_accepted(self):
+        """Test that --verbose flag is accepted by the resume command."""
+        log_dir = tempfile.mkdtemp()
+        state_dir = tempfile.mkdtemp()
+        run_id = "verb1234"
+        state = {
+            "workflow_name": "my_workflow",
+            "run_id": run_id,
+            "_progress": {"total": 2, "completed": 1},
+        }
+        state_path = os.path.join(state_dir, f"20260316-{run_id}.json")
+        with open(state_path, "w") as f:
+            json.dump(state, f)
+
+        agents_code = textwrap.dedent(f"""\
+            from antkeeper.core.app import App, run_workflow
+            from antkeeper.core.domain import State
+
+            app = App(log_dir="{log_dir}", state_dir="{state_dir}")
+
+            def step_one(runner, state: State) -> State:
+                return {{**state, "steps": state.get("steps", []) + ["one"]}}
+
+            def step_two(runner, state: State) -> State:
+                return {{**state, "steps": state.get("steps", []) + ["two"]}}
+
+            @app.handler
+            def my_workflow(runner, state: State) -> State:
+                return run_workflow(runner, state, [step_one, step_two])
+        """)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(agents_code)
+            f.flush()
+            agents_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "resume",
+                "--agents-file", agents_path,
+                "--verbose",
+                run_id,
+            ])
+            assert result.exit_code == 0
+            assert "two" in result.output
+        finally:
+            os.unlink(agents_path)
+
+
 class TestNoSubcommand:
     """Test CLI with no subcommand shows help."""
 

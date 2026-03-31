@@ -366,6 +366,7 @@ class SlackEventProcessor:
             slack_token=token,
             channel_id=entry.channel_id,
             thread_ts=entry.ts,
+            verbose=os.environ.get("ANTKEEPER_SLACK_VERBOSE", "").lower() in ("1", "true"),
         )
         runner = Runner(self._app, channel)
         await asyncio.to_thread(run_workflow_background, runner)

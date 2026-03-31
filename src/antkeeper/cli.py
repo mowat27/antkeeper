@@ -99,7 +99,7 @@ def parse_state_pairs(pairs: list[str]) -> dict[str, str]:
     return state
 
 
-def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict) -> None:
+def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict, *, verbose: bool = False) -> None:
     """Execute a workflow via CLI channel."""
     try:
         app = load_app(agents_file)
@@ -113,7 +113,7 @@ def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict) -> None
         sys.exit(1)
 
     logger.info(f"App loaded from {agents_file}")
-    channel = CliChannel(workflow_name=workflow_name, initial_state=state)
+    channel = CliChannel(workflow_name=workflow_name, initial_state=state, verbose=verbose)
     runner = Runner(app, channel)
     logger.info(f"Runner created: run_id={runner.id}")
     try:
@@ -161,9 +161,10 @@ def cli(ctx):
 @click.option("--agents-file", default="handlers.py", help="Path to Python file containing the app.")
 @click.option("--initial-state", multiple=True, help="Key=value pairs for initial workflow state.")
 @click.option("--model", default=None, help="Model identifier to use for LLM operations.")
+@click.option("--verbose", is_flag=True, default=False, help="Show all events as JSON instead of only progress/error.")
 @click.argument("workflow_name")
 @click.argument("prompt_files", nargs=-1, required=False)
-def run(agents_file, initial_state, model, workflow_name, prompt_files):
+def run(agents_file, initial_state, model, verbose, workflow_name, prompt_files):
     """Execute a workflow."""
     state = parse_state_pairs(list(initial_state))
     if model is not None:
@@ -180,13 +181,14 @@ def run(agents_file, initial_state, model, workflow_name, prompt_files):
         state["prompt"] = "".join(parts)
     elif not sys.stdin.isatty():
         state["prompt"] = sys.stdin.read()
-    _run_workflow_cli(agents_file, workflow_name, state)
+    _run_workflow_cli(agents_file, workflow_name, state, verbose=verbose)
 
 
 @cli.command()
 @click.option("--agents-file", default="handlers.py", help="Path to Python file containing the app.")
+@click.option("--verbose", is_flag=True, default=False, help="Show all events as JSON instead of only progress/error.")
 @click.argument("run_id")
-def resume(agents_file, run_id):
+def resume(agents_file, verbose, run_id):
     """Resume a previously interrupted workflow run."""
     try:
         app = load_app(agents_file)
@@ -220,7 +222,7 @@ def resume(agents_file, run_id):
         sys.exit(1)
 
     state["_resume_skip"] = completed
-    channel = CliChannel(workflow_name=state["workflow_name"], initial_state=state)
+    channel = CliChannel(workflow_name=state["workflow_name"], initial_state=state, verbose=verbose)
     runner = Runner(app, channel)
     logger.info(f"Resuming run_id={run_id} as new run_id={runner.id}")
     try:

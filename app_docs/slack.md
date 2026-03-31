@@ -170,15 +170,7 @@ If the message included file attachments, `initial_state["files"]` is also set.
 
 `SlackChannel.report(run_id, event)` implements the `Channel` protocol. It suppresses events with `event.internal=True` (housekeeping calls such as the extraction step). For visible events, it delegates to `_post_to_thread()`, formatting messages with the workflow name and run ID:
 
-**Note on event volume:** `cc_handler` filters events before they reach the channel. By default (`verbose=False`), only `result` and `error` events with non-empty content are posted to the Slack thread — intermediate `assistant`, `tool`, and `rate_limit` events are suppressed at the handler level. To post all LLM stream events to the thread (e.g. for debugging or transparency), pass `verbose=True` to `cc_handler`:
-
-```python
-# Default — thread shows only result/error messages
-implement = cc_handler("/implement $spec_file")
-
-# Verbose — thread shows every assistant thought and tool use
-implement = cc_handler("/implement $spec_file", verbose=True)
-```
+**Note on event volume:** Event filtering is controlled by the `SlackChannel`'s `verbose` constructor parameter. By default (`verbose=False`), only `progress` and `error` events with non-empty content are posted to the Slack thread — intermediate `assistant`, `tool`, `result`, and `rate_limit` events are suppressed at the channel level. Slack always renders events as plain text (`event.content`) regardless of verbose mode, for thread readability.
 
 - Non-error events: `[workflow_name, run_id] message`
 - Error events: `[workflow_name, run_id] [ERROR] message`

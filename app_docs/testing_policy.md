@@ -86,7 +86,7 @@ tests/
 │   └── test_timestamps.py     # make_timestamp() and make_log_dir() unit tests
 ├── llm/               # Tests for src/antkeeper/llm/
 │   ├── test_claude_code_agent.py  # ClaudeCodeAgent streaming tests
-│   ├── test_run_prompt.py         # run_prompt() and collect_result() tests
+│   ├── test_run_prompt.py         # run_prompt() tests
 │   └── test_middleware.py         # build_pipeline() and extraction middleware tests
 ├── git/               # Tests for src/antkeeper/git/
 │   ├── conftest.py    # git_repo fixture
@@ -128,6 +128,16 @@ def test_run_invokes_workflow(tmp_path):
 
 For file-based inputs (e.g., positional prompt file arguments), write known content to a temp file and verify it flows through to the handler state.
 
+### CliChannel Testing Patterns
+
+CliChannel unit tests (`tests/channels/test_cli_channel.py`) assert on stdout/stderr output using `capsys`:
+
+**Key patterns:**
+- Capture stdout/stderr with `capsys.readouterr()` after calling `channel.report()`
+- Non-verbose mode renders as `event.content` plain text; verbose mode renders as `event.to_json()` JSON
+
+Tests cover: channel type identifier, initial state handling, progress output format (plain text, stdout), error output format (`[ERROR]` prefix, stderr), verbose defaults to False, non-verbose mode suppresses non-progress/error events, verbose mode shows all events as JSON, empty content suppressed regardless of verbose, and internal event suppression.
+
 ### API Channel Testing Patterns
 
 API channel tests follow the same test double pattern as CLI channel:
@@ -137,6 +147,10 @@ API channel tests follow the same test double pattern as CLI channel:
 - Test initial state handling (parametrized for None default)
 - Test progress output goes to stdout with correct format
 - Test error output goes to stderr using delegation pattern
+- Test verbose defaults to False
+- Test non-verbose mode suppresses non-progress/error events
+- Test verbose mode shows all events as JSON
+- Test empty content suppressed regardless of verbose
 
 **Server endpoint tests** (`tests/test_server.py`):
 - Use FastAPI's `TestClient` from `httpx` package
@@ -185,7 +199,7 @@ def test_report_survives_http_failure(self, mock_client_cls):
     channel.report("run1", event)  # should not raise
 ```
 
-Tests cover: channel type identifier, initial state handling (parametrized for None default), progress event format, error event `[ERROR]` prefix, internal event suppression, and HTTP failure resilience.
+Tests cover: channel type identifier, initial state handling (parametrized for None default), progress event format, error event `[ERROR]` prefix, internal event suppression, HTTP failure resilience, verbose defaults to False, non-verbose mode suppresses non-progress/error events, verbose mode shows all events as plain text, and empty content suppressed regardless of verbose.
 
 ### Slack Server Testing Patterns
 
@@ -350,11 +364,7 @@ All tests that mock a successful subprocess response use JSONL lines correspondi
 - `test_otel_span_attributes_from_result` — span has session_id, cost, token counts from result metadata
 - `test_otel_span_closed_on_incomplete_consumption` — generator close triggers `span.end()`
 
-**`tests/llm/test_run_prompt.py`** — tests for `run_prompt()` and `collect_result()`:
-
-- `test_collect_result_returns_text_and_events` — consumes stream, returns `(text, events)`
-- `test_collect_result_empty_stream` — returns `("", [])`
-- `test_collect_result_ignores_internal_result` — only non-internal result used as text
+**`tests/llm/test_run_prompt.py`** — tests for `run_prompt()`:
 
 **`tests/llm/test_middleware.py`** (new file) — tests for `build_pipeline()` and extraction middleware:
 
@@ -418,17 +428,17 @@ def test_state_updates_extracts_only_named_fields(mock_cls, mock_rp, mock_ej, ru
     assert "extra" not in result
 ```
 
-**Events forwarded to channel** — assert that `channel.events` contains the events yielded during handler execution. Because `cc_handler` filters events by default (only `result` and `error` pass through), tests that verify all event types reach the channel must pass `verbose=True`:
+**Events forwarded to channel** — `cc_handler` forwards all events unconditionally to `runner.channel.report()`. Assert that `channel.events` contains the expected events:
 
 ```python
-h = cc_handler("/cmd", verbose=True)
+h = cc_handler("/cmd")
 runner, channel = runner_factory()
 h(runner, {})
 assert any(e.type == "result" for e in channel.events)
-assert any(e.type == "assistant" for e in channel.events)  # only visible with verbose=True
+assert any(e.type == "assistant" for e in channel.events)
 ```
 
-For tests that verify filtering behaviour (e.g. that assistant events are suppressed by default), omit `verbose=True` and assert the filtered event type is absent from `channel.events`.
+Event filtering (which types are displayed) is now handled by each channel's `verbose` parameter, not by `cc_handler`.
 
 **Error handling tests expect `WorkflowFailedError`** — when the agent stream raises `AgentExecutionError`, or `extract_json` raises `ValueError`, or a state key is missing from the command string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
 
@@ -456,7 +466,7 @@ For tests that verify pre-existing keys are restored (not deleted), set the key 
 
 Tests cover: env vars visible during execution, env restored after success, env restored after failure (WorkflowFailedError), pre-existing var overridden during execution and restored after, `env=None` is a no-op, env active during both extraction-mode `run_prompt` calls, and multiple env vars set and cleaned up together.
 
-Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), handler-level env (set during execution, restored after success/failure, noop for None, active across both extraction calls), and verbose mode / event filtering (`_should_report` unit tests for all event types and modes; integration tests for default mode suppressing assistant/tool events, forwarding result/error events, and verbose mode forwarding all event types; empty content always suppressed regardless of mode).
+Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), handler-level env (set during execution, restored after success/failure, noop for None, active across both extraction calls), and unconditional event forwarding to channel.
 
 ### GitHub Helper Testing Patterns
 
