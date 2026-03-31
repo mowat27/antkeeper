@@ -1,0 +1,291 @@
+# Channels Expert - Mental Model
+# Antkeeper channel protocol, implementations, construction sites, and event flow.
+# Last full rebuild: 2026-03-31
+
+freshness:
+  last_fetched_channels: 1774978486
+  last_fetched_domain: 1774959545
+  last_fetched_runner: 1774544580
+  last_fetched_cli: 1774978486
+  last_fetched_webhook: 1773106200
+  last_fetched_slack_events: 1774978486
+
+# ---------------------------------------------------------------------------
+# Channel Protocol
+# ---------------------------------------------------------------------------
+channel_protocol:
+  file: src/antkeeper/core/domain.py
+  description: >
+    typing.Protocol with three required attributes and one method.
+  attributes:
+    - name: type
+      type: str
+      purpose: Identifies channel kind - "cli", "api", or "slack"
+    - name: workflow_name
+      type: str
+      purpose: Name of the workflow handler to invoke
+    - name: initial_state
+      type: "State (dict[str, Any])"
+      purpose: Seed state merged into runner state before execution
+  methods:
+    - name: report
+      signature: "report(self, run_id: str, event: StreamEvent) -> None"
+      purpose: >
+        Receive a StreamEvent from runner and render it to the channel's
+        output medium. Called by Runner.report_progress() and
+        Runner.report_error().
+
+# ---------------------------------------------------------------------------
+# StreamEvent
+# ---------------------------------------------------------------------------
+stream_event:
+  file: src/antkeeper/core/domain.py
+  description: >
+    Dataclass representing a single event from an LLM streaming response.
+  fields:
+    - name: type
+      type: str
+      values: progress, assistant, tool, result, rate_limit, error
+    - name: content
+      type: str
+      purpose: Human-readable payload
+    - name: metadata
+      type: "dict[str, Any] | None"
+      purpose: Optional structured data (usage, cost, rate limit fields)
+    - name: internal
+      type: bool
+      default: false
+      purpose: >
+        True for housekeeping calls (e.g. extraction step). Internal events
+        are always filtered out by report().
+  methods:
+    - name: to_json
+      returns: str
+      purpose: Serialize to JSON via dataclasses.asdict
+
+# ---------------------------------------------------------------------------
+# WorkflowFailedError
+# ---------------------------------------------------------------------------
+workflow_failed_error:
+  file: src/antkeeper/core/domain.py
+  description: >
+    Exception raised by Runner.fail() to signal workflow failure. Caught by
+    entry points (CLI exits with status 1, Slack posts error to thread).
+
+# ---------------------------------------------------------------------------
+# Channel Implementations
+# ---------------------------------------------------------------------------
+implementations:
+
+  cli_channel:
+    file: src/antkeeper/channels/cli.py
+    class: CliChannel
+    type_value: cli
+    init_params:
+      - "workflow_name: str"
+      - "initial_state: dict[str, str] | None = None"
+      - "*, verbose: bool = False"
+    report_logic: |
+      1. Skip if event.internal is True
+      2. Skip if event.content is falsy
+      3. If not verbose: skip unless event.type in ("progress", "error")
+      4. Render: verbose -> event.to_json(), non-verbose -> event.content
+      5. Format: "[{workflow_name}, {run_id}] {rendered}"
+      6. Errors go to stderr, everything else to stdout (flush=True)
+    logger: antkeeper.channels.cli
+
+  api_channel:
+    file: src/antkeeper/channels/api.py
+    class: ApiChannel
+    type_value: api
+    init_params:
+      - "workflow_name: str"
+      - "initial_state: dict[str, str] | None = None"
+      - "*, verbose: bool = False"
+    report_logic: |
+      Identical filtering and rendering to CliChannel.
+      1. Skip if event.internal or not event.content
+      2. If not verbose: skip unless type in ("progress", "error")
+      3. Render: verbose -> to_json(), non-verbose -> content
+      4. Format: "[{workflow_name}, {run_id}] {rendered}"
+      5. Errors to stderr, else stdout (flush=True)
+    notes: >
+      No dedicated logger. Simpler than CliChannel - no debug logging on init.
+
+  slack_channel:
+    file: src/antkeeper/channels/slack.py
+    class: SlackChannel
+    type_value: slack
+    init_params:
+      - "workflow_name: str"
+      - "initial_state: State | None = None"
+      - "*, slack_token: str"
+      - "channel_id: str"
+      - "thread_ts: str"
+      - "verbose: bool = False"
+    report_logic: |
+      1. Skip if event.internal or not event.content
+      2. If not verbose: skip unless type in ("progress", "error")
+      3. Always renders as plain text (no JSON mode for Slack)
+      4. Errors prefixed with [ERROR]: "[{workflow_name}, {run_id}] [ERROR] {content}"
+      5. Non-errors: "[{workflow_name}, {run_id}] {content}"
+      6. Posts via _post_to_thread (synchronous httpx.Client POST)
+    slack_api_call:
+      url: "https://slack.com/api/chat.postMessage"
+      auth: "Bearer {slack_token}"
+      payload_keys: [channel, thread_ts, text]
+    error_handling: >
+      httpx.HTTPError caught and logged, never raised. Messages silently
+      fail if Slack is unreachable.
+    logger: antkeeper.channels.slack
+    notes: >
+      Uses synchronous httpx because handler code runs in threadpool via
+      asyncio.to_thread.
+
+# ---------------------------------------------------------------------------
+# Verbose Mode
+# ---------------------------------------------------------------------------
+verbose_mode:
+  description: >
+    Controls event filtering in report(). Owned by channels, not handlers.
+    Each channel accepts verbose as a keyword-only bool in __init__.
+  behaviour:
+    verbose_true: >
+      All events with content are shown (after internal filter).
+      CLI/API render as JSON (event.to_json()). Slack renders as plain text.
+    verbose_false: >
+      Only "progress" and "error" events are shown (after internal filter).
+      All channels render as plain text (event.content).
+  common_filter: |
+    if event.internal: return
+    if not event.content: return
+    if not self.verbose and event.type not in ("progress", "error"): return
+  configuration:
+    cli: "--verbose flag on 'run' and 'resume' commands"
+    api: "Not currently configurable - defaults to False"
+    slack: "ANTKEEPER_SLACK_VERBOSE env var ('1' or 'true', case-insensitive)"
+
+# ---------------------------------------------------------------------------
+# Runner Integration
+# ---------------------------------------------------------------------------
+runner_integration:
+  file: src/antkeeper/core/runner.py
+  description: >
+    Runner stores a Channel reference and delegates event delivery to it.
+    Runner does not filter events - that is the channel's responsibility.
+  key_methods:
+    - name: report_progress
+      creates: "StreamEvent(type='progress', content=message)"
+      calls: "self.channel.report(self.id, event)"
+    - name: report_error
+      creates: "StreamEvent(type='error', content=message)"
+      calls: "self.channel.report(self.id, event)"
+    - name: fail
+      raises: WorkflowFailedError
+      note: Does not call report - entry points catch this exception
+  channel_attributes_used:
+    - channel.workflow_name (via Runner.workflow_name property)
+    - channel.initial_state (merged into state in Runner.run())
+    - channel.type (logged as span attribute)
+    - channel.report() (called by report_progress and report_error)
+
+# ---------------------------------------------------------------------------
+# Construction Sites
+# ---------------------------------------------------------------------------
+construction_sites:
+
+  cli_run_command:
+    file: src/antkeeper/cli.py
+    function: _run_workflow_cli
+    constructs: CliChannel
+    params_passed:
+      workflow_name: from click argument
+      initial_state: parsed from --initial-state key=value pairs
+      verbose: from --verbose flag (bool)
+    called_by: "'run' click command"
+
+  cli_resume_command:
+    file: src/antkeeper/cli.py
+    function: resume (click command)
+    constructs: CliChannel
+    params_passed:
+      workflow_name: from persisted state["workflow_name"]
+      initial_state: loaded from state file (with _resume_skip injected)
+      verbose: from --verbose flag (bool)
+
+  webhook_endpoint:
+    file: src/antkeeper/http/webhook.py
+    function: handle_webhook
+    constructs: ApiChannel
+    params_passed:
+      workflow_name: from WebhookRequest.workflow_name
+      initial_state: from WebhookRequest.initial_state
+      verbose: "not passed - defaults to False"
+    execution: background task via FastAPI BackgroundTasks
+    notes: >
+      Verbose is not currently exposed on the webhook API.
+
+  slack_event_processor:
+    file: src/antkeeper/http/slack_events.py
+    function: "SlackEventProcessor._on_timer_fire"
+    constructs: SlackChannel
+    params_passed:
+      workflow_name: first word after bot mention
+      initial_state: "{prompt: accumulated_text, slack_user: user_id, files?: [...]}"
+      slack_token: "os.environ['SLACK_BOT_TOKEN']"
+      channel_id: from event
+      thread_ts: from event
+      verbose: "os.environ.get('ANTKEEPER_SLACK_VERBOSE') in ('1', 'true')"
+    execution: "asyncio.to_thread(run_workflow_background, runner)"
+
+# ---------------------------------------------------------------------------
+# Slack Event Processing
+# ---------------------------------------------------------------------------
+slack_event_processing:
+  file: src/antkeeper/http/slack_events.py
+  class: SlackEventProcessor
+  env_vars:
+    - name: SLACK_BOT_TOKEN
+      purpose: Bot OAuth token for Slack API calls
+    - name: SLACK_BOT_USER_ID
+      purpose: Bot user ID for mention detection
+    - name: SLACK_COOLDOWN_SECONDS
+      purpose: Debounce timer seconds (default 30)
+    - name: ANTKEEPER_SLACK_VERBOSE
+      purpose: "Enable verbose mode for Slack channel ('1' or 'true')"
+  event_flow:
+    1_receive: handle_event receives Slack Events API body
+    2_filter: Skips bot messages (is_bot_message), url_verification
+    3_route: |
+      - Thread reply -> _handle_thread_reply (accumulate to pending)
+      - Edit -> _handle_edit (update pending text)
+      - Delete -> _handle_delete (cancel and remove pending)
+      - Mention/message -> _handle_mention (create pending, start timer)
+    4_debounce: >
+      _on_timer_fire waits cooldown seconds, pops pending entry,
+      validates workflow exists, constructs SlackChannel, creates Runner,
+      dispatches via asyncio.to_thread.
+  pending_message:
+    key: "(channel_id, ts) tuple"
+    accumulates: "text (appended on thread replies), files (extended)"
+    fields: [channel_id, ts, user, text, files, workflow_name, timer_task]
+  reactions: >
+    Adds thumbsup reaction on initial mention and on thread replies
+    to pending messages.
+  helpers:
+    - "is_bot_message(event) -> bool - checks for bot_id field"
+    - "is_bot_mention(text, bot_user_id) -> bool - checks for <@USER_ID>"
+    - "strip_mention(text) -> str - removes leading <@U...> from text"
+    - "slack_api(token, method, payload) -> dict - async httpx POST to Slack"
+
+# ---------------------------------------------------------------------------
+# State Type
+# ---------------------------------------------------------------------------
+state_type:
+  file: src/antkeeper/core/domain.py
+  definition: "type State = dict[str, Any]"
+  reserved_keys:
+    - run_id: "8-char hex UUID set by Runner"
+    - workflow_name: "set by Runner from channel.workflow_name"
+    - _progress: "{total: int, completed: int} managed by run_workflow"
+    - _resume_skip: "int - consumed by run_workflow for resume, never persisted"

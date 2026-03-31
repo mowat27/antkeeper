@@ -767,6 +767,7 @@ http_modules:
       - "SLACK_BOT_TOKEN — Slack bot OAuth token"
       - "SLACK_BOT_USER_ID — Slack user ID for mention detection"
       - "SLACK_COOLDOWN_SECONDS — debounce timer seconds (default: 30)"
+      - "ANTKEEPER_SLACK_VERBOSE — when '1' or 'true' (case-insensitive), sets verbose=True on SlackChannel created by _on_timer_fire"
     routing_order:
       - "url_verification -> return challenge"
       - "no event -> 200"
@@ -983,9 +984,9 @@ key_design_decisions:
     async httpx (event loop). Independent clients. Thread context (channel_id,
     thread_ts) captured at construction from the @mention event.
   - >
-    Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS)
-    read from environment at request time. python-dotenv loads .env file in
-    create_app(). .env is gitignored.
+    Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS,
+    ANTKEEPER_SLACK_VERBOSE) read from environment at request time. python-dotenv
+    loads .env file in create_app(). .env is gitignored.
   - >
     App-level env injection via App(env={...}). Values are static or callables(runner);
     resolved by Runner.run() before _app_env. App.log_dir also supports callables.

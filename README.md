@@ -73,7 +73,7 @@ The same workflow runs from an HTTP webhook or a CI job. With a Slack app config
 
 **Channels** are I/O adapters. They decouple workflow logic from how it is triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel posts to threads (requires your own Slack app — see below). Handlers do not need to know which channel is active.
 
-**Agents** are the LLM abstraction. Any object with a `prompt(str) -> Iterator[StreamEvent]` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI using `--output-format stream-json`, streaming events as they arrive. The protocol is deliberately minimal — plug in any backend. The `cc_handler` factory is a convenience method built on this protocol, but hand-written handlers can use it directly via `run_prompt()` + `collect_result()`.
+**Agents** are the LLM abstraction. Any object with a `prompt(str) -> Iterator[StreamEvent]` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI using `--output-format stream-json`, streaming events as they arrive. The protocol is deliberately minimal — plug in any backend. The `cc_handler` factory is a convenience method built on this protocol, but hand-written handlers can use it directly via `run_prompt()`.
 
 ### Built-in Integrations
 
@@ -128,6 +128,9 @@ antkeeper run --model sonnet sdlc prompts/add-auth.md
 
 # Start the API server
 antkeeper server --host 0.0.0.0 --port 8000
+
+# Run with verbose output (all events as JSON instead of only progress/error)
+antkeeper run --model sonnet --verbose sdlc prompts/add-auth.md
 
 # Resume a partially-completed workflow (run_id shown in the original run output)
 antkeeper resume a1b2c3d4

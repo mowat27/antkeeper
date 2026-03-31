@@ -212,6 +212,10 @@ Events with empty content and internal events are always suppressed regardless o
 
 `cc_handler` forwards all events unconditionally to `runner.channel.report()` — the channel decides what to display.
 
+Verbose mode is wired through entry points:
+- **CLI:** pass `--verbose` to the `run` or `resume` command: `antkeeper run --verbose sdlc prompts/add-auth.md`
+- **Slack:** set the `ANTKEEPER_SLACK_VERBOSE` environment variable to `1` or `true`.
+
 ### Middleware Pipeline
 
 The factory uses a composable middleware pipeline to transform the event stream. A `Middleware` is a `Callable[[Iterator[StreamEvent]], Iterator[StreamEvent]]`. `build_pipeline(stream, middlewares)` chains middlewares left-to-right around the source stream.

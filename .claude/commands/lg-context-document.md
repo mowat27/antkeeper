@@ -67,8 +67,9 @@ Ask each expert to self-improve by invoking their skill:
 
 - `design-expert` — invoke with "self-improve"
 - `otel-expert` — invoke with "self-improve"
+- `channels-expert` — invoke with "self-improve"
 
-These run as blocking skill invocations so the experts can read the (now-current) codebase.
+These run in parallel as blocking skill invocations so the experts can read the (now-current) codebase.
 
 ### Phase 3: README
 

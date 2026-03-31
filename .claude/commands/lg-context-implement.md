@@ -25,7 +25,7 @@ You are a builder with full codebase access. The spec tells you WHAT to build an
 
 1. **Understand the spec** — read it fully. Understand the interface changes, acceptance criteria, and any architectural constraints called out in Notes.
 2. **Find the relevant files yourself** — use Glob and Grep. Do not wait to be told what to read.
-3. **Validate architectural fit before writing code** — check your approach against the existing patterns. Use the design-expert skill when uncertain. It is better to pause and check than to implement something that breaks the architecture.
+3. **Validate architectural fit before writing code** — check your approach against the existing patterns. Use the `*-expert` skills when uncertain (descriptions loaded into context already). It is better to pause and check than to implement something that breaks the architecture.
 4. **Write tests** — follow `app_docs/testing_policy.md` exactly. Tests exercise framework behaviour, not app logic.
 5. **Reach zero** — all validation checks must pass with zero errors and zero warnings before you are done. Investigate and fix failures; do not explain them away.
 
@@ -38,9 +38,9 @@ You are a builder with full codebase access. The spec tells you WHAT to build an
 - No backwards-compatibility shims, unused variables, or re-exports for removed code
 - Do not add features, refactoring, or improvements outside the spec scope — implement exactly what is specified, nothing more
 
-### When to Use design-expert
+### When to use an expert skill
 
-Invoke the design-expert skill before writing code if you are unsure about:
+Invoke an expert skill before writing code if you are unsure about:
 - Where a new concept belongs in the layer structure
 - Whether something belongs in core vs channels vs handlers
 - How a new type or function should be named and structured

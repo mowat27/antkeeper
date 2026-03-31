@@ -37,6 +37,7 @@ Slack sends a `url_verification` challenge when you first set the Request URL. T
 | `SLACK_BOT_TOKEN` | (empty string) | Bot User OAuth Token from Slack app settings (starts with `xoxb-`). Used for all Slack API calls. | Yes |
 | `SLACK_BOT_USER_ID` | (empty string) | The Slack user ID of the bot (e.g. `U07ABC123`). Used to detect @mentions in message text. Find this under the bot's profile in Slack. | Yes |
 | `SLACK_COOLDOWN_SECONDS` | `30` | Number of seconds to wait after the last interaction before dispatching the workflow. Resets on edits and thread replies. | No |
+| `ANTKEEPER_SLACK_VERBOSE` | (empty) | When set to `1` or `true`, the SlackChannel shows all event types (not just progress/error). Events are always rendered as plain text regardless of this setting. | No |
 
 ### .env File Support
 
@@ -46,6 +47,7 @@ The server calls `dotenv.load_dotenv()` at startup (in `create_app()`), so all t
 SLACK_BOT_TOKEN=xoxb-your-token-here
 SLACK_BOT_USER_ID=U07ABC123
 SLACK_COOLDOWN_SECONDS=30
+ANTKEEPER_SLACK_VERBOSE=false
 ```
 
 ### Environment Variable Validation
