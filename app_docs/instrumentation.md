@@ -188,6 +188,18 @@ def my_step(runner: Runner, state: State) -> State:
 
 Module-level loggers exist in `cli.py`, `channels/cli.py`, `channels/slack.py`, and `llm/claude_code.py`. These only produce output if a user configures handlers on them or their parents — they serve as extension points for additional logging.
 
+### ralph Progress Log
+
+The `ralph()` retry wrapper creates its own separate plain-text log file at:
+
+```
+{log_dir}/ralph-{label}-{runner.id}.log
+```
+
+This file is distinct from the runner's file-based Python log. It is written by `ralph` directly (not via `runner.logger`) so that it can be read back on each retry attempt to build the augmented prompt. The runner log and the ralph progress log are both rooted in the same `log_dir`.
+
+Contents are append-only: each attempt adds an entry with the attempt number, a state diff (keys added/changed/removed, values truncated at 200 chars), and the validation outcome (PASSED or FAILED with feedback). Entries are separated by `---` delimiter lines.
+
 ## Claude Code Handler Factory
 
 The `cc_handler` factory (`antkeeper.handlers.claude_code.factories`) eliminates boilerplate for building Claude Code handlers. It produces `(Runner, State) -> State` callables in two modes:

@@ -19,6 +19,8 @@ src/antkeeper/
 │   ├── branch.py       # Branch operations (current)
 │   └── worktrees.py    # Worktree class, git_worktree context manager
 ├── handlers/           # Pre-built handler collections
+│   ├── __init__.py     # Re-exports ralph and ValidationResult
+│   ├── ralph.py        # ralph() retry-with-validation wrapper factory
 │   └── claude_code/    # SDLC handlers using Claude Code as the LLM backend
 │       ├── __init__.py # Exports cc_handler factory
 │       └── factories.py # cc_handler factory implementation
@@ -156,6 +158,105 @@ Or use them directly in `run_workflow` without registering:
 @app.handler
 def sdlc(runner, state):
     return run_workflow(runner, state, [specify, branch, implement, document])
+```
+
+### Retry-with-Validation Wrapper (ralph)
+
+The `ralph()` factory wraps any handler with a retry-validation loop. It works with `@app.handler`-decorated handlers, `cc_handler`-built handlers, or any plain callable matching `(Runner, State) -> State`.
+
+```python
+from antkeeper.handlers.ralph import ralph, ValidationResult
+
+def my_validator(state):
+    if "result" not in state:
+        return ValidationResult(success=False, feedback="Missing result key")
+    return ValidationResult(success=True, feedback="")
+
+wrapped = ralph(my_handler, validator=my_validator, max_retries=3)
+```
+
+**Signature:**
+
+```python
+ralph(
+    handler: Callable[[Runner, State], State],
+    *,
+    validator: Callable[[State], ValidationResult] | str,
+    max_retries: int = 3,
+    prompt_key: str = "prompt",
+    label: str | None = None,
+) -> Callable[[Runner, State], State]
+```
+
+**Parameters:**
+- `handler` — the handler to wrap
+- `validator` — either a Python callable `(State) -> ValidationResult` or a path to a bash script (stdin/stdout JSON contract; see below)
+- `max_retries` — number of retries after the initial attempt; default 3 means 4 total attempts
+- `prompt_key` — state key holding the prompt to augment on retries; default `"prompt"`
+- `label` — name for the wrapper; defaults to `handler.__name__`. Also used as the log filename component
+
+**Retry loop:**
+
+On each attempt `ralph` calls `runner.report_progress(f"ralph {label}: attempt N/M")`, invokes the handler, then calls the validator. If validation passes, the original prompt is restored and the state is returned. If it fails, the feedback is appended to the progress log and the prompt is augmented with prior-attempts context before the next attempt. After all attempts are exhausted, `runner.fail()` raises `WorkflowFailedError`.
+
+**Original prompt restoration:** When validation passes, the value of `state[prompt_key]` from before the retry loop is restored in the returned state, undoing any augmentation added during retries.
+
+**Prompt augmentation on retries:**
+
+```
+Previous attempts have not passed validation. Here is the history:
+
+<prior_attempts>
+{progress_log_content}
+</prior_attempts>
+
+Please address the feedback and try again.
+
+{original_prompt}
+```
+
+**Progress log:** A separate plain-text append-only file at `{log_dir}/ralph-{label}-{runner.id}.log`. Each entry records the attempt number, a state diff (keys added/changed/removed, values truncated at 200 chars), and the validation result with feedback. This file is read back to build the augmented prompt on retries; it is distinct from the runner's own log file.
+
+**Exception propagation:** Handler and validator exceptions propagate immediately without retry.
+
+**Bash script validators:**
+
+```python
+wrapped = ralph(my_handler, validator="/path/to/validate.sh")
+```
+
+The script receives state as JSON on stdin and must write `{"success": bool, "feedback": "..."}` to stdout. Non-zero exit or invalid JSON raises an exception that propagates immediately. The path-to-callable conversion happens once at factory time.
+
+**`ValidationResult` dataclass:**
+
+```python
+from antkeeper.handlers.ralph import ValidationResult
+
+ValidationResult(success=True, feedback="")
+ValidationResult(success=False, feedback="reason it failed")
+```
+
+**Registering a ralph-wrapped handler:**
+
+```python
+wrapped = ralph(my_handler, validator=my_validator, max_retries=3)
+app.add_handler(wrapped)  # uses wrapped.__name__ as the registered name
+```
+
+Or use directly in `run_workflow`:
+
+```python
+@app.handler
+def my_workflow(runner, state):
+    return run_workflow(runner, state, [wrapped_step1, wrapped_step2])
+```
+
+**`test_ralph` workflow:**
+
+`handlers.py` ships a deterministic `test_ralph` workflow that exercises the full retry loop with no LLM dependency. It increments `attempt_count` on each call and passes on the 4th attempt. Run it with:
+
+```bash
+antkeeper run test_ralph
 ```
 
 ### LLM Integration in Hand-Written Handlers
@@ -318,7 +419,7 @@ The **channels layer** (`src/antkeeper/channels/`) has I/O adapters. Add new cha
 
 The **http layer** (`src/antkeeper/http/`) contains HTTP endpoint logic. `webhook.py` handles POST `/webhook`, `slack_events.py` handles POST `/slack_event` with debounce state.
 
-The **handlers layer** (`src/antkeeper/handlers/`) contains pre-built handler collections. `handlers/claude_code/` provides the `cc_handler` factory for building LLM-backed handlers.
+The **handlers layer** (`src/antkeeper/handlers/`) contains pre-built handler collections. `handlers/ralph.py` provides the `ralph()` retry-with-validation wrapper. `handlers/claude_code/` provides the `cc_handler` factory for building LLM-backed handlers.
 
 The **llm layer** (`src/antkeeper/llm/`) abstracts LLM interactions behind the `Agent` protocol. Add new LLM backends by implementing `prompt(str) -> str`.
 

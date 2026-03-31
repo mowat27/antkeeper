@@ -12,6 +12,7 @@ from antkeeper.core.domain import State
 from antkeeper.core.app import App, run_workflow
 from antkeeper.git.worktrees import Worktree, git_worktree
 from antkeeper.handlers.claude_code.factories import cc_handler
+from antkeeper.handlers.ralph import ralph, ValidationResult
 from antkeeper.llm.claude_code import run_prompt
 
 
@@ -180,6 +181,59 @@ def specify_and_branch(runner: Runner, state: State) -> State:
         Updated state with ``spec_file``, ``slug``, and ``branch_name`` set.
     """
     return run_workflow(runner, state, SDLC_STEPS[0:2])
+
+
+def _increment(runner: Runner, state: State) -> State:
+    """Increment ``attempt_count`` in state by 1.
+
+    Args:
+        runner: The active workflow runner (unused).
+        state: Current workflow state. Reads ``attempt_count`` (defaults to 0).
+
+    Returns:
+        Updated state with ``attempt_count`` incremented by 1.
+    """
+    count = state.get("attempt_count", 0) + 1
+    return {**state, "attempt_count": count}
+
+
+def _needs_four(state: State) -> ValidationResult:
+    """Validate that ``attempt_count`` has reached 4.
+
+    Used as the validator for ``_ralph_increment`` in the ``test_ralph`` workflow.
+
+    Args:
+        state: Current workflow state. Reads ``attempt_count`` (defaults to 0).
+
+    Returns:
+        A passing ``ValidationResult`` when ``attempt_count >= 4``, otherwise a
+        failing result with descriptive feedback.
+    """
+    count = state.get("attempt_count", 0)
+    if count >= 4:
+        return ValidationResult(success=True, feedback="")
+    return ValidationResult(success=False, feedback=f"attempt_count is {count}, need 4")
+
+
+_ralph_increment = ralph(_increment, validator=_needs_four, max_retries=3, label="test-ralph")
+"""Ralph-wrapped ``_increment`` handler that retries until ``attempt_count`` reaches 4."""
+
+
+@app.handler
+def test_ralph(runner: Runner, state: State) -> State:
+    """Deterministic test workflow for the ralph retry wrapper.
+
+    Increments ``attempt_count`` on each attempt; passes on the 4th attempt.
+    Runnable with ``antkeeper run test_ralph``.
+
+    Args:
+        runner: The active workflow runner.
+        state: Current workflow state.
+
+    Returns:
+        Updated state with ``attempt_count`` equal to 4 on success.
+    """
+    return _ralph_increment(runner, state)
 
 
 @app.handler
