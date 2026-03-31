@@ -140,6 +140,8 @@ Factory options:
 - `label` — human-readable name for progress messages. Defaults to the first token of the command
 - `model` — override the LLM model for this handler. Defaults to `state.get("model")`
 - `env` — per-handler environment variable overrides. Merges with App-level env (handler values win)
+- `opts` — extra CLI arguments forwarded verbatim to `ClaudeCodeAgent`. Defaults to `None`
+- `yolo` — when `True` (default), passes `--dangerously-skip-permissions` to the CLI. Set to `False` to require explicit permission grants
 
 Register factory-built handlers with `app.add_handler()`:
 

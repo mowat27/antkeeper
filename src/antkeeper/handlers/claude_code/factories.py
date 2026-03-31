@@ -23,6 +23,10 @@ forwarded to the channel.  When ``False`` (the default) only ``result``
 and ``error`` events with non-empty content are forwarded.  When ``True``
 every event with non-empty content is forwarded, which is useful for
 debugging or when intermediate progress messages are desired.
+
+An optional ``opts`` list passes arbitrary CLI flags to the underlying
+``ClaudeCodeAgent``.  An optional ``yolo`` bool controls permission
+skipping (defaults to ``True`` for backward compatibility).
 """
 
 import logging
@@ -175,6 +179,8 @@ def cc_handler(
     model: str | None = None,
     env: dict[str, str] | None = None,
     verbose: bool = False,
+    opts: list[str] | None = None,
+    yolo: bool = True,
 ) -> Handler:
     """Build a handler that runs a Claude Code command and updates state.
 
@@ -193,6 +199,10 @@ def cc_handler(
         verbose: When ``True``, all events with non-empty content are forwarded
             to the channel.  When ``False`` (default), only ``result`` and
             ``error`` events with non-empty content are forwarded.
+        opts: Extra CLI arguments forwarded verbatim to ``ClaudeCodeAgent``.
+            When ``None`` (default), no extra flags are added.
+        yolo: When ``True`` (default), passes ``--dangerously-skip-permissions``
+            to the CLI.  Set to ``False`` to require explicit permission grants.
 
     Returns:
         A handler function with signature ``(Runner, State) -> State``.
@@ -233,7 +243,7 @@ def cc_handler(
                     command,
                 )
                 effective_model = model if model is not None else state.get("model")
-                agent = ClaudeCodeAgent(model=effective_model, yolo=True)
+                agent = ClaudeCodeAgent(model=effective_model, yolo=yolo, opts=opts)
                 stream: Iterator[StreamEvent] = agent.prompt(prompt)
 
                 middlewares: list[Middleware] = []
