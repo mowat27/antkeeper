@@ -11,6 +11,7 @@
 7. [Use runner for communication — not print](#use-runner-for-communication--not-print)
 8. [Stream events through the channel](#stream-events-through-the-channel)
 9. [All commands run via uv](#all-commands-run-via-uv)
+10. [Retry with validation using ralph](#retry-with-validation-using-ralph)
 
 ---
 
@@ -290,3 +291,55 @@ def test_with_fake_agent(app, runner_factory):
     result = runner.run()
     assert result["result"] == "canned"
 ```
+
+---
+
+## Retry with validation using ralph
+
+**Rule:** When a handler needs to retry until a validation check passes, wrap it with `ralph()` rather than hand-rolling a retry loop.
+
+**Why:** `ralph` handles the retry counter, augments the prompt with prior-attempt history and feedback, writes a per-run log file, and calls `runner.fail()` on exhaustion. Hand-rolling this is ~50 lines of boilerplate and is easy to get wrong.
+
+**Pattern:**
+```python
+from antkeeper.handlers.ralph import ralph, ValidationResult
+
+implement = cc_handler("/implement $spec_file")
+
+def tests_pass(state: State) -> ValidationResult:
+    import subprocess
+    result = subprocess.run(["uv", "run", "pytest", "--tb=no", "-q"], capture_output=True, text=True)
+    if result.returncode == 0:
+        return ValidationResult(success=True, feedback="")
+    return ValidationResult(success=False, feedback=result.stdout[-500:])
+
+implement_with_retry = ralph(implement, validator=tests_pass, max_retries=3)
+```
+
+Or use a bash script as the validator:
+```python
+implement_with_retry = ralph(implement, validator="scripts/validate.sh")
+```
+
+The bash script receives state as JSON on stdin and must write `{"success": bool, "feedback": "..."}` to stdout; non-zero exit propagates as an exception.
+
+**Full signature:**
+```python
+ralph(
+    handler: Handler,           # The handler to wrap
+    *,
+    validator: Callable | str,  # Callable (State) -> ValidationResult, or path to bash script
+    max_retries: int = 3,       # Retries after first attempt (4 total by default)
+    prompt_key: str = "prompt", # State key to augment with prior-attempt context
+    label: str | None = None,   # Name for the wrapper; defaults to handler.__name__
+) -> Handler
+```
+
+**Behaviour:**
+- Attempt 1: calls handler with current state unchanged
+- Attempts 2+: augments `state[prompt_key]` with the full prior-attempts log before calling the handler
+- On each failure: appends attempt number, state diff, and validator feedback to a log at `<log_dir>/ralph-<label>-<run_id>.log`
+- On success: restores original `state[prompt_key]` in the returned state
+- On exhaustion: calls `runner.fail()` raising `WorkflowFailedError`
+
+**When NOT to use ralph:** When the retry condition is not a simple pass/fail on the output state. Ralph is for "run, validate, retry with feedback" loops. Complex conditional branching needs a hand-written handler.
