@@ -418,11 +418,17 @@ def test_state_updates_extracts_only_named_fields(mock_cls, mock_rp, mock_ej, ru
     assert "extra" not in result
 ```
 
-**Events forwarded to channel** — assert that `channel.events` contains the events yielded during handler execution:
+**Events forwarded to channel** — assert that `channel.events` contains the events yielded during handler execution. Because `cc_handler` filters events by default (only `result` and `error` pass through), tests that verify all event types reach the channel must pass `verbose=True`:
 
 ```python
+h = cc_handler("/cmd", verbose=True)
+runner, channel = runner_factory()
+h(runner, {})
 assert any(e.type == "result" for e in channel.events)
+assert any(e.type == "assistant" for e in channel.events)  # only visible with verbose=True
 ```
+
+For tests that verify filtering behaviour (e.g. that assistant events are suppressed by default), omit `verbose=True` and assert the filtered event type is absent from `channel.events`.
 
 **Error handling tests expect `WorkflowFailedError`** — when the agent stream raises `AgentExecutionError`, or `extract_json` raises `ValueError`, or a state key is missing from the command string, the factory routes through `runner.fail()` which raises `WorkflowFailedError`. Test with `pytest.raises(WorkflowFailedError)`.
 
@@ -450,7 +456,7 @@ For tests that verify pre-existing keys are restored (not deleted), set the key 
 
 Tests cover: env vars visible during execution, env restored after success, env restored after failure (WorkflowFailedError), pre-existing var overridden during execution and restored after, `env=None` is a no-op, env active during both extraction-mode `run_prompt` calls, and multiple env vars set and cleaned up together.
 
-Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), and handler-level env (set during execution, restored after success/failure, noop for None, active across both extraction calls).
+Tests cover: label derivation (slash stripping, first token, explicit override), extraction mode (two-call sequence, field extraction, progress messages, extraction model always haiku, step 1 and step 2 failure paths), fire-and-forget mode (single call, state unchanged, empty `state_updates` list), `$var` interpolation (single, multiple, non-string values, `${var}` literal passthrough), model override (per-handler model, state fallback, extraction always uses haiku regardless), error handling (AgentExecutionError, bad JSON, missing state key, missing JSON field in response), handler-level env (set during execution, restored after success/failure, noop for None, active across both extraction calls), and verbose mode / event filtering (`_should_report` unit tests for all event types and modes; integration tests for default mode suppressing assistant/tool events, forwarding result/error events, and verbose mode forwarding all event types; empty content always suppressed regardless of mode).
 
 ### GitHub Helper Testing Patterns
 

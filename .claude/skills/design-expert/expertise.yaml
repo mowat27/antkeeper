@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-26 (feature/agent-data-streaming)
+# Last validated: 2026-03-31 (enhancement/cc-handler-verbose-mode)
 
 overview:
   name: antkeeper
@@ -518,7 +518,7 @@ helper_functions:
 handler_factories:
   cc_handler:
     file: src/antkeeper/handlers/claude_code/factories.py
-    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None, env: dict[str, str] | None = None) -> Handler"
+    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None, env: dict[str, str] | None = None, verbose: bool = False) -> Handler"
     returns: "Handler Protocol — callable (Runner, State) -> State with __name__ attribute"
     responsibility: >
       Factory producing (Runner, State) -> State handler functions in two modes:
@@ -539,6 +539,9 @@ handler_factories:
         Intercepts result events; runs second run_prompt (extraction prompt);
         yields extraction events with internal=True after original result event.
         Non-result events pass through. model_opts = (_EXTRACTION_MODEL, ["--max-turns", "1"]).
+      _should_report: >
+        _should_report(event: StreamEvent, verbose: bool) -> bool. Empty content -> False.
+        verbose=True: any event type passes. verbose=False: only 'result' and 'error' pass.
     behavior:
       label_derivation: "Default label = first token of command with leading slash stripped."
       handler.__name__: "Set to label for framework introspection (app.add_handler() compatible)."
@@ -547,15 +550,16 @@ handler_factories:
         Missing state key -> KeyError -> runner.fail().
       fire_and_forget_mode: >
         state_updates None/empty: streams agent.prompt() through empty pipeline,
-        forwards each event to runner.channel.report(). Returns state unchanged.
+        forwards events gated by _should_report(event, verbose). Returns state unchanged.
       extraction_mode: >
         state_updates non-empty: pipeline with _extraction_middleware (haiku, --max-turns 1).
-        All events forwarded to channel. Internal result events parsed via extract_json.
-        Extracted fields merged into state. Missing field -> KeyError -> runner.fail().
+        Events forwarded gated by _should_report(event, verbose). Internal result events
+        parsed via extract_json. Extracted fields merged into state. Missing field -> KeyError -> runner.fail().
       streaming: >
-        Handler drains pipeline event-by-event via runner.channel.report(runner.id, event).
-        Channels receive all streaming events (assistant, tool, result) in real time.
-        Internal=True events forwarded but suppressed by channels. Pipeline closed in finally.
+        Handler drains pipeline event-by-event, gating each via _should_report(event, verbose).
+        Default mode (verbose=False): only 'result' and 'error' events with non-empty content
+        are forwarded to channel. Verbose mode (verbose=True): all events with non-empty content
+        forwarded. Internal=True events are gated by same logic. Pipeline closed in finally.
       model_resolution: >
         Primary: model if not None else state.get("model"). Factory model beats state model.
         Extraction: always haiku with --max-turns 1.
@@ -854,8 +858,9 @@ testing_design:
     class: TestChannel
     satisfies: Channel protocol (duck-typed)
     captures:
-      - "progress_messages: list[str]"
-      - "error_messages: list[str]"
+      - "progress_messages: list[str]  # non-error event content"
+      - "error_messages: list[str]  # error event content"
+      - "events: list[StreamEvent]  # all events; report() routes error type to error_messages, rest to progress_messages"
   fixtures:
     app:
       signature: "() -> App"
@@ -891,7 +896,7 @@ testing_design:
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline (events forwarded to channel), extraction mode (middleware inserts internal events, haiku + max-turns 1), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling (KeyError/AgentExecutionError/ValueError -> runner.fail), handler-level env (set/restore)
+    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline, extraction mode (haiku + max-turns 1), fire-and-forget mode, $var interpolation, model override, error handling, handler-level env, _should_report unit tests (result/error pass; assistant/tool/rate_limit suppressed in default mode; verbose=True forwards all; empty content always suppressed), verbose mode integration tests
     - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
     - tests/llm/test_run_prompt.py — run_prompt: returns Iterator[StreamEvent], delegates to ClaudeCodeAgent with yolo=True, passes model/opts
     - tests/core/test_loader.py — TestLoadApp: returns app object, FileNotFoundError on missing file, AttributeError on missing app attr
@@ -936,14 +941,15 @@ key_design_decisions:
     Per-run file logging. Each Runner creates an isolated log file. No console
     logging from the framework. Module-level loggers provide debug tracing.
   - >
-    cc_handler factory: streaming pipeline architecture. Creates a ClaudeCodeAgent and drains
-    its event stream, forwarding each event to the channel in real time. Middlewares transform
-    the stream (e.g. extraction middleware). Fire-and-forget (no state_updates) = empty pipeline.
-    Extraction mode = pipeline with _extraction_middleware (haiku + --max-turns 1) that splices
-    internal extraction events after each result event. Factory model overrides state['model'];
-    extraction always uses haiku. Internal events (internal=True) are forwarded to channel but
-    channels suppress them from user output. Handler __name__ set to label for app.add_handler().
-    See handler_factories section for full detail.
+    cc_handler factory: streaming pipeline architecture with configurable verbosity. Creates a
+    ClaudeCodeAgent and drains its event stream, gating each event via _should_report(event,verbose).
+    Default mode (verbose=False): only 'result' and 'error' events with content reach the channel.
+    Verbose mode (verbose=True): all events with content forwarded. Middlewares transform the stream
+    (e.g. extraction middleware). Fire-and-forget (no state_updates) = empty pipeline. Extraction
+    mode = pipeline with _extraction_middleware (haiku + --max-turns 1) that splices internal
+    extraction events after each result event. Factory model overrides state['model']; extraction
+    always uses haiku. Handler __name__ set to label for app.add_handler(). See handler_factories
+    section for full detail.
   - >
     Git worktree isolation. sdlc_iso creates a worktree per run on
     {feature_type}/{slug}, enabling parallel feature dev without cwd/branch
