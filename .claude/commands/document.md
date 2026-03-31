@@ -23,7 +23,7 @@ FOCUS: Git commit(s), files, directories, experts etc. Default to whole system.
 * Find all python files in the focus area using the appropriate method (`git`, `ls` etc) but do not read them
 * Spawn subagents to do the following (blocking Tasks, subagent_type: general-purpose)
   * **Python Documenter** agents (max: 5). Each reads a batch of files, updates the python docs and returns a concise summary. Do NOT spawn it in the background.
-  * **Expert Updater** agent. Asks the `design-expert` skill to "self improve"
+  * **Expert Updater** agent. Find all expert skills in context (name ends with `-expert`) and asks them to "self improve" simultaneously, in parallel.
   * **App Docs Updater** agent.  Follows `App Doc Update Workflow`
 
 ### App Doc Update Workflow

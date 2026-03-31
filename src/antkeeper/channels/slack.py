@@ -33,6 +33,7 @@ class SlackChannel:
         slack_token: str,
         channel_id: str,
         thread_ts: str,
+        verbose: bool = False,
     ) -> None:
         """Initialize a SlackChannel instance.
 
@@ -42,6 +43,9 @@ class SlackChannel:
             slack_token: Slack bot token for API authentication.
             channel_id: Slack channel ID where the workflow was triggered.
             thread_ts: Timestamp of the thread to post messages to.
+            verbose: When True, all events with content are shown.
+                When False (default), only progress/error events are shown.
+                Slack always renders as plain text regardless of verbose.
         """
         self.type = "slack"
         self.workflow_name = workflow_name
@@ -49,6 +53,7 @@ class SlackChannel:
         self._slack_token = slack_token
         self._channel_id = channel_id
         self._thread_ts = thread_ts
+        self.verbose = verbose
         logger.debug(f"SlackChannel initialized: channel={channel_id}, thread_ts={thread_ts}")
 
     def _post_to_thread(self, text: str) -> None:
@@ -84,6 +89,10 @@ class SlackChannel:
             event: The stream event to report.
         """
         if event.internal:
+            return
+        if not event.content:
+            return
+        if not self.verbose and event.type not in ("progress", "error"):
             return
         if event.type == "error":
             self._post_to_thread(f"[{self.workflow_name}, {run_id}] [ERROR] {event.content}")

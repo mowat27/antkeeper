@@ -110,7 +110,9 @@ class ClaudeCodeAgent:
     subprocess execution, and converts CLI errors into AgentExecutionErrors.
 
     Attributes:
-        model: Optional model identifier passed to the Claude CLI via --model flag.
+        model: Optional model identifier passed to the Claude CLI via ``--model``.
+        yolo: When ``True``, passes ``--dangerously-skip-permissions`` to the CLI.
+        opts: Extra CLI arguments appended after all other flags.
     """
 
     def __init__(
@@ -255,23 +257,3 @@ def run_prompt(
     logger.debug(f"run_prompt called (prompt length={len(prompt)} chars)")
     agent = ClaudeCodeAgent(model=model, yolo=True, opts=opts)
     return agent.prompt(prompt)
-
-
-def collect_result(events: Iterator[StreamEvent]) -> tuple[str, list[StreamEvent]]:
-    """Consume an event stream, returning (result_text, all_events).
-
-    Args:
-        events: An iterator of StreamEvent instances.
-
-    Returns:
-        A tuple of (result_text, all_events). result_text is the content of
-        the last non-internal result event. all_events is the full list of
-        events consumed.
-    """
-    all_events: list[StreamEvent] = []
-    result_text = ""
-    for event in events:
-        all_events.append(event)
-        if event.type == "result" and not event.internal:
-            result_text = event.content
-    return result_text, all_events

@@ -37,6 +37,7 @@ Slack sends a `url_verification` challenge when you first set the Request URL. T
 | `SLACK_BOT_TOKEN` | (empty string) | Bot User OAuth Token from Slack app settings (starts with `xoxb-`). Used for all Slack API calls. | Yes |
 | `SLACK_BOT_USER_ID` | (empty string) | The Slack user ID of the bot (e.g. `U07ABC123`). Used to detect @mentions in message text. Find this under the bot's profile in Slack. | Yes |
 | `SLACK_COOLDOWN_SECONDS` | `30` | Number of seconds to wait after the last interaction before dispatching the workflow. Resets on edits and thread replies. | No |
+| `ANTKEEPER_SLACK_VERBOSE` | (empty) | When set to `1` or `true`, the SlackChannel shows all event types (not just progress/error). Events are always rendered as plain text regardless of this setting. | No |
 
 ### .env File Support
 
@@ -46,6 +47,7 @@ The server calls `dotenv.load_dotenv()` at startup (in `create_app()`), so all t
 SLACK_BOT_TOKEN=xoxb-your-token-here
 SLACK_BOT_USER_ID=U07ABC123
 SLACK_COOLDOWN_SECONDS=30
+ANTKEEPER_SLACK_VERBOSE=false
 ```
 
 ### Environment Variable Validation
@@ -170,15 +172,7 @@ If the message included file attachments, `initial_state["files"]` is also set.
 
 `SlackChannel.report(run_id, event)` implements the `Channel` protocol. It suppresses events with `event.internal=True` (housekeeping calls such as the extraction step). For visible events, it delegates to `_post_to_thread()`, formatting messages with the workflow name and run ID:
 
-**Note on event volume:** `cc_handler` filters events before they reach the channel. By default (`verbose=False`), only `result` and `error` events with non-empty content are posted to the Slack thread — intermediate `assistant`, `tool`, and `rate_limit` events are suppressed at the handler level. To post all LLM stream events to the thread (e.g. for debugging or transparency), pass `verbose=True` to `cc_handler`:
-
-```python
-# Default — thread shows only result/error messages
-implement = cc_handler("/implement $spec_file")
-
-# Verbose — thread shows every assistant thought and tool use
-implement = cc_handler("/implement $spec_file", verbose=True)
-```
+**Note on event volume:** Event filtering is controlled by the `SlackChannel`'s `verbose` constructor parameter. By default (`verbose=False`), only `progress` and `error` events with non-empty content are posted to the Slack thread — intermediate `assistant`, `tool`, `result`, and `rate_limit` events are suppressed at the channel level. Slack always renders events as plain text (`event.content`) regardless of verbose mode, for thread readability.
 
 - Non-error events: `[workflow_name, run_id] message`
 - Error events: `[workflow_name, run_id] [ERROR] message`

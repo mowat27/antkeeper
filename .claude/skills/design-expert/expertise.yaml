@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-31 (merge: cc-handler-verbose-mode + cc-handler-cli-parity)
+# Last validated: 2026-03-31 (branch: refactor/channel-verbose-control)
 
 overview:
   name: antkeeper
@@ -221,11 +221,14 @@ domain_types:
       - "content: str  # human-readable payload"
       - "metadata: dict[str, Any] | None = None  # structured data (usage, cost, rate limit)"
       - "internal: bool = False  # True for housekeeping events (e.g. extraction step)"
+    methods:
+      - "to_json() -> str  # serializes event to JSON string via dataclasses.asdict + json.dumps"
     notes: >
       Represents a single event from an LLM streaming response. Used as the
       unit of data flow from agents through channels. Channels suppress
       internal=True events (not shown to users). The 'result' type carries
       the final LLM response text in content plus usage/cost in metadata.
+      Channels use to_json() in verbose mode to render full event details.
 
   Channel:
     file: src/antkeeper/core/domain.py
@@ -429,7 +432,8 @@ llm_types:
       prompt: >
         Builds command: ['claude'] + [--model model] (if model set and not in opts)
         + [--dangerously-skip-permissions] (if yolo and not in opts)
-        + [--output-format stream-json] (if not in opts) + opts + ['-p', prompt].
+        + [--output-format stream-json] (if not in opts) + [--verbose] (if not in opts)
+        + opts + ['-p', prompt].
         Runs via subprocess.Popen, reads stdout line-by-line via _parse_jsonl_line().
         Yields StreamEvent instances. 'result' events include metadata (session_id,
         duration_ms, usage, total_cost_usd, model). Telemetry set on OTel span via
@@ -450,15 +454,6 @@ llm_types:
         _set_span_telemetry(span, metadata) -> None.
         Sets session_id, duration_ms, input_tokens, output_tokens, total_cost_usd, model
         attributes on the active span from result event metadata. No-op if metadata is None.
-
-  collect_result:
-    file: src/antkeeper/llm/claude_code.py
-    signature: "collect_result(events: Iterator[StreamEvent]) -> tuple[str, list[StreamEvent]]"
-    kind: module-level convenience function
-    responsibility: >
-      Consumes an event stream, returns (result_text, all_events). result_text is
-      the content of the last non-internal 'result' event. Utility for callers
-      that need to block on the full stream and extract the final result.
 
   run_prompt:
     file: src/antkeeper/llm/claude_code.py
@@ -517,7 +512,7 @@ helper_functions:
 handler_factories:
   cc_handler:
     file: src/antkeeper/handlers/claude_code/factories.py
-    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None, env: dict[str, str] | None = None, verbose: bool = False, opts: list[str] | None = None, yolo: bool = True) -> Handler"
+    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None, env: dict[str, str] | None = None, opts: list[str] | None = None, yolo: bool = True) -> Handler"
     returns: "Handler Protocol — callable (Runner, State) -> State with __name__ attribute"
     responsibility: >
       Factory producing (Runner, State) -> State handler functions in two modes:
@@ -538,9 +533,7 @@ handler_factories:
         Intercepts result events; runs second run_prompt (extraction prompt);
         yields extraction events with internal=True after original result event.
         Non-result events pass through. model_opts = (_EXTRACTION_MODEL, ["--max-turns", "1"]).
-      _should_report: >
-        _should_report(event: StreamEvent, verbose: bool) -> bool. Empty content -> False.
-        verbose=True: any event type passes. verbose=False: only 'result' and 'error' pass.
+
     behavior:
       label_derivation: "Default label = first token of command with leading slash stripped."
       handler.__name__: "Set to label for framework introspection (app.add_handler() compatible)."
@@ -549,16 +542,15 @@ handler_factories:
         Missing state key -> KeyError -> runner.fail().
       fire_and_forget_mode: >
         state_updates None/empty: streams agent.prompt() through empty pipeline,
-        forwards events gated by _should_report(event, verbose). Returns state unchanged.
+        forwards all events directly to runner.channel.report(). Returns state unchanged.
       extraction_mode: >
         state_updates non-empty: pipeline with _extraction_middleware (haiku, --max-turns 1).
-        Events forwarded gated by _should_report(event, verbose). Internal result events
+        All events forwarded directly to runner.channel.report(). Internal result events
         parsed via extract_json. Extracted fields merged into state. Missing field -> KeyError -> runner.fail().
       streaming: >
-        Handler drains pipeline event-by-event, gating each via _should_report(event, verbose).
-        Default mode (verbose=False): only 'result' and 'error' events with non-empty content
-        are forwarded to channel. Verbose mode (verbose=True): all events with non-empty content
-        forwarded. Internal=True events are gated by same logic. Pipeline closed in finally.
+        Handler drains pipeline event-by-event, forwarding all events to runner.channel.report().
+        Verbosity filtering is now the channel's responsibility (verbose param on CliChannel,
+        ApiChannel, SlackChannel). Pipeline closed in finally.
       model_resolution: >
         Primary: model if not None else state.get("model"). Factory model beats state model.
         Extraction: always haiku with --max-turns 1.
@@ -587,24 +579,25 @@ channel_implementations:
   CliChannel:
     file: src/antkeeper/channels/cli.py
     satisfies: Channel protocol
-    construction: "CliChannel(workflow_name: str, initial_state: dict[str,str] | None = None)"
+    construction: "CliChannel(workflow_name: str, initial_state: dict[str,str] | None = None, *, verbose: bool = False)"
     behavior:
       type: '"cli"'
       initial_state: "Copies input dict or defaults to {}"
       report: >
-        Suppresses internal=True events. Prints [workflow_name, run_id] + event.content
-        to stdout (flush=True) or stderr if event.type == 'error'.
+        Suppresses internal=True events and empty content. Default (verbose=False): only
+        'progress' and 'error' events printed as plain text. verbose=True: all non-internal
+        events printed as JSON (event.to_json()). Prints to stdout or stderr (error type).
 
   ApiChannel:
     file: src/antkeeper/channels/api.py
     satisfies: Channel protocol
-    construction: "ApiChannel(workflow_name: str, initial_state: dict[str,str] | None = None)"
+    construction: "ApiChannel(workflow_name: str, initial_state: dict[str,str] | None = None, *, verbose: bool = False)"
     behavior:
       type: '"api"'
       initial_state: "Copies input dict or defaults to {}"
       report: >
-        Identical to CliChannel.report(). Suppresses internal=True events.
-        Prints to stdout or stderr depending on event.type.
+        Identical to CliChannel.report(). Default (verbose=False): only 'progress' and 'error'
+        events as plain text. verbose=True: all non-internal events as JSON (event.to_json()).
     notes: >
       Identical to CliChannel except type="api". Both use flush=True.
       Designed for FastAPI server where output goes to Uvicorn logs.
@@ -612,12 +605,14 @@ channel_implementations:
   SlackChannel:
     file: src/antkeeper/channels/slack.py
     satisfies: Channel protocol
-    construction: "SlackChannel(workflow_name: str, initial_state: State | None = None, *, slack_token: str, channel_id: str, thread_ts: str)"
+    construction: "SlackChannel(workflow_name: str, initial_state: State | None = None, *, slack_token: str, channel_id: str, thread_ts: str, verbose: bool = False)"
     behavior:
       type: '"slack"'
       initial_state: "Copies input dict or defaults to {}"
       report: >
-        Suppresses internal=True events. Posts to Slack thread via _post_to_thread().
+        Suppresses internal=True events and empty content. Default (verbose=False): only
+        'progress' and 'error' events posted as plain text. verbose=True: all non-internal
+        events posted. Always renders as plain text (no JSON rendering unlike CLI/API).
         Error events include [ERROR] prefix. HTTP errors caught and logged, never raised.
     design_constraint: >
       Uses sync httpx.Client (not async) because handlers run in threadpool
@@ -772,6 +767,7 @@ http_modules:
       - "SLACK_BOT_TOKEN — Slack bot OAuth token"
       - "SLACK_BOT_USER_ID — Slack user ID for mention detection"
       - "SLACK_COOLDOWN_SECONDS — debounce timer seconds (default: 30)"
+      - "ANTKEEPER_SLACK_VERBOSE — when '1' or 'true' (case-insensitive), sets verbose=True on SlackChannel created by _on_timer_fire"
     routing_order:
       - "url_verification -> return challenge"
       - "no event -> 200"
@@ -901,7 +897,7 @@ testing_design:
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline, extraction mode (haiku + max-turns 1), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling (KeyError/AgentExecutionError/ValueError -> runner.fail), handler-level env (set/restore), _should_report unit tests (result/error pass; assistant/tool/rate_limit suppressed in default mode; verbose=True forwards all; empty content always suppressed), verbose mode integration tests, opts forwarded to agent (empty list as-is, extraction isolation), yolo default True + yolo=False forwarding
+    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline, extraction mode (haiku + max-turns 1), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling (KeyError/AgentExecutionError/ValueError -> runner.fail), handler-level env (set/restore), opts forwarded to agent (empty list as-is, extraction isolation), yolo default True + yolo=False forwarding; all events forwarded to channel (verbosity is channel's concern)
     - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
     - tests/llm/test_run_prompt.py — run_prompt: returns Iterator[StreamEvent], delegates to ClaudeCodeAgent with yolo=True, passes model/opts
     - tests/core/test_loader.py — TestLoadApp: returns app object, FileNotFoundError on missing file, AttributeError on missing app attr
@@ -946,17 +942,12 @@ key_design_decisions:
     Per-run file logging. Each Runner creates an isolated log file. No console
     logging from the framework. Module-level loggers provide debug tracing.
   - >
-    cc_handler factory: streaming pipeline architecture with configurable verbosity. Creates a
-    ClaudeCodeAgent and drains its event stream, gating each event via _should_report(event,verbose).
-    Default mode (verbose=False): only 'result' and 'error' events with content reach the channel.
-    Verbose mode (verbose=True): all events with content forwarded. Middlewares transform the stream
-    (e.g. extraction middleware). Fire-and-forget (no state_updates) = empty pipeline. Extraction
-    mode = pipeline with _extraction_middleware (haiku + --max-turns 1) that splices internal
-    extraction events after each result event. Factory model overrides state['model']; extraction
-    always uses haiku. opts forwarded verbatim to primary ClaudeCodeAgent only (not extraction).
-    yolo=True (default) for backward compatibility; yolo=False skips permission flag. Internal
-    events (internal=True) are forwarded to channel but channels suppress them from user output.
-    Handler __name__ set to label for app.add_handler(). See handler_factories section for full detail.
+    cc_handler factory: streaming pipeline; all events forwarded to runner.channel.report() —
+    verbosity filtering is the channel's concern (verbose param on CliChannel/ApiChannel/SlackChannel).
+    Fire-and-forget (no state_updates) = empty pipeline. Extraction mode = _extraction_middleware
+    (haiku + --max-turns 1) splices internal extraction events after result. Factory model overrides
+    state['model']; extraction always uses haiku. opts to primary agent only. yolo=True default.
+    Handler __name__ set to label. See handler_factories section for full detail.
   - >
     Git worktree isolation. sdlc_iso creates a worktree per run on
     {feature_type}/{slug}, enabling parallel feature dev without cwd/branch
@@ -993,9 +984,9 @@ key_design_decisions:
     async httpx (event loop). Independent clients. Thread context (channel_id,
     thread_ts) captured at construction from the @mention event.
   - >
-    Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS)
-    read from environment at request time. python-dotenv loads .env file in
-    create_app(). .env is gitignored.
+    Slack env vars (SLACK_BOT_TOKEN, SLACK_BOT_USER_ID, SLACK_COOLDOWN_SECONDS,
+    ANTKEEPER_SLACK_VERBOSE) read from environment at request time. python-dotenv
+    loads .env file in create_app(). .env is gitignored.
   - >
     App-level env injection via App(env={...}). Values are static or callables(runner);
     resolved by Runner.run() before _app_env. App.log_dir also supports callables.

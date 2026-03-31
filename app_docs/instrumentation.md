@@ -13,10 +13,10 @@ def my_step(runner: Runner, state: State) -> State:
 
 `runner.report_progress(message)` constructs a `StreamEvent(type="progress", content=message)` and calls `channel.report(run_id, event)`. The channel formats and outputs the event based on its implementation:
 
-- **CliChannel**: Writes to stdout with format `[workflow_name, run_id] message`. Internal events are suppressed.
-- **ApiChannel**: Writes to stdout with format `[workflow_name, run_id] message` (appears in server logs). Internal events are suppressed.
-- **SlackChannel**: Posts to Slack thread via httpx sync POST. Internal events are suppressed. Error events are prefixed with `[ERROR] `.
-- **TestChannel**: Appends all events to `events: list[StreamEvent]`. Progress events also go to `progress_messages`; error events go to `error_messages`.
+- **CliChannel**: Writes to stdout (errors to stderr) with format `[workflow_name, run_id] message`. In non-verbose mode (default) only `progress` and `error` events are shown, rendered as plain text. In verbose mode all events are shown, rendered as JSON (`event.to_json()`). Internal events and events with empty content are always suppressed.
+- **ApiChannel**: Same filtering and rendering as CliChannel. Progress goes to stdout; errors go to stderr (visible in server logs).
+- **SlackChannel**: Posts to Slack thread via httpx sync POST. Same event-type filtering as CliChannel, but always renders as plain text (`event.content`) regardless of verbose mode, for thread readability.
+- **TestChannel**: Appends all events to `events: list[StreamEvent]`. Progress events also go to `progress_messages`; error events go to `error_messages`. Captures all events unconditionally — not affected by verbose.
 
 ## Error Reporting
 
@@ -46,7 +46,7 @@ All channels implement `report(run_id: str, event: StreamEvent) -> None`. The `S
 | `metadata` | `dict[str, Any] \| None` | Structured data (usage, cost, rate limit fields). |
 | `internal` | `bool` | `True` for housekeeping calls (e.g. extraction step). Defaults to `False`. |
 
-All channels suppress events with `event.internal=True` (housekeeping calls such as the extraction step). Filtering of non-internal event types (`assistant`, `tool`, `rate_limit`) is done upstream by `cc_handler` via `_should_report()` before events reach the channel — channels themselves do not filter by event type. The `TestChannel` captures all events that reach it for test assertion.
+All channels suppress events with `event.internal=True` (housekeeping calls such as the extraction step). Each channel also filters by event type based on its `verbose` constructor parameter: when `verbose=False` (default), only `progress` and `error` events with non-empty content are displayed; when `verbose=True`, all events with non-empty content are displayed. The `TestChannel` captures all events unconditionally for test assertion.
 
 ## Run Identification
 
@@ -192,34 +192,35 @@ Module-level loggers exist in `cli.py`, `channels/cli.py`, `channels/slack.py`, 
 
 The `cc_handler` factory (`antkeeper.handlers.claude_code.factories`) eliminates boilerplate for building Claude Code handlers. It produces `(Runner, State) -> State` callables in two modes:
 
-- **Fire-and-forget mode** — create a `ClaudeCodeAgent`, stream its events, filter them via `_should_report()`, forward matching events to `runner.channel.report()`, and return state unchanged.
+- **Fire-and-forget mode** — create a `ClaudeCodeAgent`, stream its events, forward all events unconditionally to `runner.channel.report()`, and return state unchanged.
 - **Extraction mode** — stream the primary response through a middleware pipeline. The extraction middleware intercepts each `result` event and runs a second `run_prompt` call (to haiku) to extract structured JSON fields, yielding those events with `internal=True`. The handler collects the extraction result and merges the requested `state_updates` fields into state.
 
 The extraction step always uses the `haiku` model (constant `_EXTRACTION_MODEL`), regardless of the handler's configured model. This is an implementation detail, not a caller-facing knob.
 
-### Event Filtering and the verbose Parameter
+### Event Filtering via Channel verbose Parameter
 
-By default (`verbose=False`), `cc_handler` only forwards `result` and `error` events with non-empty content to the channel. All other event types (`assistant`, `tool`, `rate_limit`, etc.) are suppressed at the handler level, before reaching the channel. This keeps channels — including Slack threads — free of intermediate LLM chatter.
+Event filtering is handled by each channel implementation, not by `cc_handler`. Each channel constructor accepts a `verbose: bool = False` parameter that controls which events are displayed:
 
-Pass `verbose=True` to forward all events with non-empty content to the channel:
+- **`verbose=False` (default):** only `progress` and `error` events with non-empty content are displayed.
+- **`verbose=True`:** all events with non-empty content are displayed.
 
-```python
-# Default — channel sees only result/error events (clean output)
-implement = cc_handler("/implement $spec_file")
+Rendering also varies by channel and verbose mode:
+- **CliChannel / ApiChannel:** non-verbose renders as `event.content` (plain text); verbose renders as `event.to_json()` (JSON).
+- **SlackChannel:** always renders as `event.content` (plain text) regardless of verbose, for thread readability.
 
-# Verbose — channel sees all LLM stream events (debugging, transparency)
-implement = cc_handler("/implement $spec_file", verbose=True)
-```
+Events with empty content and internal events are always suppressed regardless of verbose mode.
 
-Events with empty content are always suppressed regardless of `verbose` mode or event type. This filtering is implemented by the private `_should_report(event, verbose)` helper in `factories.py`.
+`cc_handler` forwards all events unconditionally to `runner.channel.report()` — the channel decides what to display.
 
-**Extraction is unaffected by verbose mode.** The extraction middleware's internal result events are processed for JSON extraction regardless of the `verbose` setting. The filtering only controls what reaches `runner.channel.report()`.
+Verbose mode is wired through entry points:
+- **CLI:** pass `--verbose` to the `run` or `resume` command: `antkeeper run --verbose sdlc prompts/add-auth.md`
+- **Slack:** set the `ANTKEEPER_SLACK_VERBOSE` environment variable to `1` or `true`.
 
 ### Middleware Pipeline
 
 The factory uses a composable middleware pipeline to transform the event stream. A `Middleware` is a `Callable[[Iterator[StreamEvent]], Iterator[StreamEvent]]`. `build_pipeline(stream, middlewares)` chains middlewares left-to-right around the source stream.
 
-Currently one middleware is used: the extraction middleware (added automatically when `state_updates` is non-empty). Events are filtered by `_should_report(event, verbose)` before being forwarded to `runner.channel.report()`.
+Currently one middleware is used: the extraction middleware (added automatically when `state_updates` is non-empty). All events are forwarded unconditionally to `runner.channel.report()` — the channel handles filtering.
 
 If the iterator is abandoned early (e.g. on error), `pipeline.close()` is called to trigger generator cleanup and release subprocess resources.
 
@@ -395,14 +396,6 @@ To correlate a run with its Claude session transcript, use the logged `session_i
 
 ```
 ~/.claude/projects/<project>/<session_id>.jsonl
-```
-
-**`collect_result(events)`** — convenience function that consumes the full stream and returns `(result_text, all_events)`. `result_text` is the content of the last non-internal `result` event. Use this in hand-written handlers that only need the final text:
-
-```python
-from antkeeper.llm.claude_code import run_prompt, collect_result
-
-response, _events = collect_result(run_prompt(...))
 ```
 
 ### Error Handling

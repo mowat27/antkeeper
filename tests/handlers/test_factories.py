@@ -24,7 +24,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from antkeeper.core.domain import StreamEvent, WorkflowFailedError
-from antkeeper.handlers.claude_code.factories import cc_handler, _should_report
+from antkeeper.handlers.claude_code.factories import cc_handler
 from antkeeper.llm.errors import AgentExecutionError
 
 
@@ -215,7 +215,7 @@ def test_fire_and_forget_consumes_stream(mock_agent_cls, runner_factory):
         StreamEvent(type="result", content="done"),
     ])
 
-    h = cc_handler("/cmd", verbose=True)
+    h = cc_handler("/cmd")
     runner, channel = runner_factory()
     h(runner, {})
     # Both events forwarded to channel
@@ -262,7 +262,7 @@ def test_events_forwarded_to_channel(mock_agent_cls, runner_factory):
         StreamEvent(type="result", content="done"),
     ])
 
-    h = cc_handler("/cmd", verbose=True)
+    h = cc_handler("/cmd")
     runner, channel = runner_factory()
     h(runner, {})
     event_types = [e.type for e in channel.events]
@@ -594,165 +594,6 @@ def test_env_with_multiple_vars(mock_agent_cls, runner_factory):
     assert captured == {"a": "1", "b": "2"}
     assert "_ANTKEEPER_TEST_HF_A" not in os.environ
     assert "_ANTKEEPER_TEST_HF_B" not in os.environ
-
-
-# ---------------------------------------------------------------------------
-# _should_report unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_should_report_result_with_content_default_mode():
-    """result event with content passes in default (non-verbose) mode."""
-    assert _should_report(StreamEvent(type="result", content="ok"), verbose=False) is True
-
-
-def test_should_report_error_with_content_default_mode():
-    """error event with content passes in default mode."""
-    assert _should_report(StreamEvent(type="error", content="oops"), verbose=False) is True
-
-
-def test_should_report_assistant_suppressed_default_mode():
-    """assistant event with content is suppressed in default mode."""
-    assert _should_report(StreamEvent(type="assistant", content="thinking"), verbose=False) is False
-
-
-def test_should_report_tool_suppressed_default_mode():
-    """tool event with content is suppressed in default mode."""
-    assert _should_report(StreamEvent(type="tool", content="call"), verbose=False) is False
-
-
-def test_should_report_rate_limit_suppressed_default_mode():
-    """rate_limit event with content is suppressed in default mode."""
-    assert _should_report(StreamEvent(type="rate_limit", content="wait"), verbose=False) is False
-
-
-def test_should_report_any_type_verbose_mode():
-    """Any event type with content passes in verbose mode."""
-    for event_type in ("assistant", "tool", "result", "error", "rate_limit"):
-        assert _should_report(StreamEvent(type=event_type, content="x"), verbose=True) is True
-
-
-def test_should_report_empty_content_always_suppressed():
-    """Empty content is always suppressed regardless of type or verbose mode."""
-    for verbose in (True, False):
-        for event_type in ("result", "error", "assistant", "tool"):
-            assert _should_report(StreamEvent(type=event_type, content=""), verbose=verbose) is False
-
-
-# ---------------------------------------------------------------------------
-# Verbose mode / event filtering (integration tests)
-# ---------------------------------------------------------------------------
-
-
-@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
-def test_default_mode_forwards_result_events(mock_agent_cls, runner_factory):
-    """Default mode: result event with content reaches the channel."""
-    mock_agent_cls.return_value = _mock_agent_prompt([
-        StreamEvent(type="assistant", content="thinking"),
-        StreamEvent(type="result", content="done"),
-    ])
-
-    h = cc_handler("/cmd")
-    runner, channel = runner_factory()
-    h(runner, {})
-    event_types = [e.type for e in channel.events]
-    assert "result" in event_types
-
-
-@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
-def test_default_mode_forwards_error_events(mock_agent_cls, runner_factory):
-    """Default mode: error event with content reaches the channel."""
-    mock_agent_cls.return_value = _mock_agent_prompt([
-        StreamEvent(type="assistant", content="thinking"),
-        StreamEvent(type="error", content="something broke"),
-    ])
-
-    h = cc_handler("/cmd")
-    runner, channel = runner_factory()
-    try:
-        h(runner, {})
-    except Exception:
-        pass
-    event_types = [e.type for e in channel.events]
-    assert "error" in event_types
-
-
-@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
-def test_default_mode_suppresses_assistant_events(mock_agent_cls, runner_factory):
-    """Default mode: assistant events do not reach the channel."""
-    mock_agent_cls.return_value = _mock_agent_prompt([
-        StreamEvent(type="assistant", content="thinking"),
-        StreamEvent(type="result", content="done"),
-    ])
-
-    h = cc_handler("/cmd")
-    runner, channel = runner_factory()
-    h(runner, {})
-    event_types = [e.type for e in channel.events]
-    assert "assistant" not in event_types
-
-
-@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
-def test_default_mode_suppresses_tool_events(mock_agent_cls, runner_factory):
-    """Default mode: tool events do not reach the channel."""
-    mock_agent_cls.return_value = _mock_agent_prompt([
-        StreamEvent(type="tool", content="running tool"),
-        StreamEvent(type="result", content="done"),
-    ])
-
-    h = cc_handler("/cmd")
-    runner, channel = runner_factory()
-    h(runner, {})
-    event_types = [e.type for e in channel.events]
-    assert "tool" not in event_types
-
-
-@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
-def test_verbose_mode_forwards_all_event_types(mock_agent_cls, runner_factory):
-    """Verbose mode: assistant, tool, and result events all reach the channel."""
-    mock_agent_cls.return_value = _mock_agent_prompt([
-        StreamEvent(type="assistant", content="thinking"),
-        StreamEvent(type="tool", content="running tool"),
-        StreamEvent(type="result", content="done"),
-    ])
-
-    h = cc_handler("/cmd", verbose=True)
-    runner, channel = runner_factory()
-    h(runner, {})
-    event_types = [e.type for e in channel.events]
-    assert "assistant" in event_types
-    assert "tool" in event_types
-    assert "result" in event_types
-
-
-@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
-def test_empty_content_never_forwarded(mock_agent_cls, runner_factory):
-    """Events with empty content are not forwarded regardless of verbose mode."""
-    for verbose in (True, False):
-        mock_agent_cls.return_value = _mock_agent_prompt([
-            StreamEvent(type="assistant", content=""),
-            StreamEvent(type="result", content=""),
-        ])
-        h = cc_handler("/cmd", verbose=verbose)
-        runner, channel = runner_factory()
-        h(runner, {})
-        # Exclude progress events (emitted by runner.report_progress, not the stream)
-        stream_events = [e for e in channel.events if e.type != "progress"]
-        assert stream_events == []
-
-
-@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
-def test_verbose_does_not_affect_state_return(mock_agent_cls, runner_factory):
-    """Verbose mode still returns state unchanged in fire-and-forget mode."""
-    mock_agent_cls.return_value = _mock_agent_prompt([
-        StreamEvent(type="assistant", content="thinking"),
-        StreamEvent(type="result", content="done"),
-    ])
-
-    h = cc_handler("/cmd", verbose=True)
-    runner, channel = runner_factory()
-    result = h(runner, {"x": 1})
-    assert result == {"x": 1}
 
 
 # ---------------------------------------------------------------------------
