@@ -46,7 +46,7 @@ All channels implement `report(run_id: str, event: StreamEvent) -> None`. The `S
 | `metadata` | `dict[str, Any] \| None` | Structured data (usage, cost, rate limit fields). |
 | `internal` | `bool` | `True` for housekeeping calls (e.g. extraction step). Defaults to `False`. |
 
-Channels that do not render assistant/tool events (CLI, API, Slack) suppress them by checking `event.internal`. The `TestChannel` captures all events for test assertion.
+All channels suppress events with `event.internal=True` (housekeeping calls such as the extraction step). Filtering of non-internal event types (`assistant`, `tool`, `rate_limit`) is done upstream by `cc_handler` via `_should_report()` before events reach the channel — channels themselves do not filter by event type. The `TestChannel` captures all events that reach it for test assertion.
 
 ## Run Identification
 
@@ -192,16 +192,34 @@ Module-level loggers exist in `cli.py`, `channels/cli.py`, `channels/slack.py`, 
 
 The `cc_handler` factory (`antkeeper.handlers.claude_code.factories`) eliminates boilerplate for building Claude Code handlers. It produces `(Runner, State) -> State` callables in two modes:
 
-- **Fire-and-forget mode** — create a `ClaudeCodeAgent`, stream its events, forward each to `runner.channel.report()`, and return state unchanged.
+- **Fire-and-forget mode** — create a `ClaudeCodeAgent`, stream its events, filter them via `_should_report()`, forward matching events to `runner.channel.report()`, and return state unchanged.
 - **Extraction mode** — stream the primary response through a middleware pipeline. The extraction middleware intercepts each `result` event and runs a second `run_prompt` call (to haiku) to extract structured JSON fields, yielding those events with `internal=True`. The handler collects the extraction result and merges the requested `state_updates` fields into state.
 
 The extraction step always uses the `haiku` model (constant `_EXTRACTION_MODEL`), regardless of the handler's configured model. This is an implementation detail, not a caller-facing knob.
+
+### Event Filtering and the verbose Parameter
+
+By default (`verbose=False`), `cc_handler` only forwards `result` and `error` events with non-empty content to the channel. All other event types (`assistant`, `tool`, `rate_limit`, etc.) are suppressed at the handler level, before reaching the channel. This keeps channels — including Slack threads — free of intermediate LLM chatter.
+
+Pass `verbose=True` to forward all events with non-empty content to the channel:
+
+```python
+# Default — channel sees only result/error events (clean output)
+implement = cc_handler("/implement $spec_file")
+
+# Verbose — channel sees all LLM stream events (debugging, transparency)
+implement = cc_handler("/implement $spec_file", verbose=True)
+```
+
+Events with empty content are always suppressed regardless of `verbose` mode or event type. This filtering is implemented by the private `_should_report(event, verbose)` helper in `factories.py`.
+
+**Extraction is unaffected by verbose mode.** The extraction middleware's internal result events are processed for JSON extraction regardless of the `verbose` setting. The filtering only controls what reaches `runner.channel.report()`.
 
 ### Middleware Pipeline
 
 The factory uses a composable middleware pipeline to transform the event stream. A `Middleware` is a `Callable[[Iterator[StreamEvent]], Iterator[StreamEvent]]`. `build_pipeline(stream, middlewares)` chains middlewares left-to-right around the source stream.
 
-Currently one middleware is used: the extraction middleware (added automatically when `state_updates` is non-empty). All events pass through to `runner.channel.report()` regardless of whether they are internal — channels decide what to render.
+Currently one middleware is used: the extraction middleware (added automatically when `state_updates` is non-empty). Events are filtered by `_should_report(event, verbose)` before being forwarded to `runner.channel.report()`.
 
 If the iterator is abandoned early (e.g. on error), `pipeline.close()` is called to trigger generator cleanup and release subprocess resources.
 
