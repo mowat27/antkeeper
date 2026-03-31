@@ -36,6 +36,14 @@ commit_push_raise_pr = cc_handler(
     "/commit_push_raise_pr", state_updates=["pr_url"])
 """Handler that commits, pushes, and raises a PR, storing the resulting ``pr_url`` in state."""
 
+count_words = cc_handler(
+    "Count the number of words in this poem: $poem",
+    state_updates=["word_count"],
+    label="count words",
+    opts=["--max-turns", "1"],
+)
+"""Handler that counts the words in ``poem`` (from state) and stores the result as ``word_count``."""
+
 # --- App ---
 
 app = App(handlers={
@@ -111,6 +119,25 @@ SDLC_STEPS = [specify, branch, implement, document]
 
 
 # --- Workflows ---
+
+
+@app.handler
+def test_workflow(runner: Runner, state: State) -> State:
+    """Run a two-step test workflow: healthcheck -> count_words.
+
+    Asks Claude to write a poem (healthcheck), then counts the words in the
+    poem and stores the result in state. Useful for verifying that the full
+    pipeline — including factory-built handlers and state extraction — is
+    working end-to-end.
+
+    Args:
+        runner: The active workflow runner.
+        state: Current workflow state.
+
+    Returns:
+        Updated state with ``poem`` and ``word_count`` set.
+    """
+    return run_workflow(runner, state, [healthcheck, count_words])
 
 
 @app.handler

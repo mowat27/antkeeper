@@ -12,6 +12,10 @@ Covers:
     - Edge cases: no placeholders, multiple placeholders, empty list, ${var} literal.
     - Handler-level env: per-handler environment variable overrides.
     - Events forwarded to channel during handler execution.
+    - opts parameter: extra CLI flags forwarded verbatim to ClaudeCodeAgent;
+      defaults to None; not passed to the extraction step.
+    - yolo parameter: controls --dangerously-skip-permissions; defaults to True
+      for backward compatibility; False is forwarded correctly.
 """
 
 import os
@@ -155,7 +159,7 @@ def test_extraction_always_uses_haiku(mock_agent_cls, mock_rp, mock_ej, runner_f
     runner, channel = runner_factory()
     h(runner, {})
     # Primary agent uses opus
-    mock_agent_cls.assert_called_once_with(model="opus", yolo=True)
+    mock_agent_cls.assert_called_once_with(model="opus", yolo=True, opts=None)
     # Extraction uses haiku
     assert mock_rp.call_args[1]["model"] == "haiku"
 
@@ -356,7 +360,7 @@ def test_model_override_passed_to_agent(mock_agent_cls, runner_factory):
     h = cc_handler("/cmd", model="claude-opus-4")
     runner, channel = runner_factory()
     h(runner, {})
-    mock_agent_cls.assert_called_once_with(model="claude-opus-4", yolo=True)
+    mock_agent_cls.assert_called_once_with(model="claude-opus-4", yolo=True, opts=None)
 
 
 @patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
@@ -369,7 +373,7 @@ def test_model_override_beats_state_model(mock_agent_cls, runner_factory):
     h = cc_handler("/cmd", model="claude-opus-4")
     runner, channel = runner_factory()
     h(runner, {"model": "claude-sonnet-4"})
-    mock_agent_cls.assert_called_once_with(model="claude-opus-4", yolo=True)
+    mock_agent_cls.assert_called_once_with(model="claude-opus-4", yolo=True, opts=None)
 
 
 @patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
@@ -382,7 +386,7 @@ def test_no_model_override_falls_back_to_state(mock_agent_cls, runner_factory):
     h = cc_handler("/cmd")
     runner, channel = runner_factory()
     h(runner, {"model": "claude-sonnet-4"})
-    mock_agent_cls.assert_called_once_with(model="claude-sonnet-4", yolo=True)
+    mock_agent_cls.assert_called_once_with(model="claude-sonnet-4", yolo=True, opts=None)
 
 
 # ---------------------------------------------------------------------------
@@ -749,3 +753,107 @@ def test_verbose_does_not_affect_state_return(mock_agent_cls, runner_factory):
     runner, channel = runner_factory()
     result = h(runner, {"x": 1})
     assert result == {"x": 1}
+
+
+# ---------------------------------------------------------------------------
+# opts and yolo parameters
+# ---------------------------------------------------------------------------
+
+
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_opts_forwarded_to_agent(mock_agent_cls, runner_factory):
+    """opts list is forwarded verbatim to ClaudeCodeAgent."""
+    mock_agent_cls.return_value = _mock_agent_prompt([
+        StreamEvent(type="result", content="ok"),
+    ])
+
+    h = cc_handler("/cmd", opts=["--max-turns", "5"])
+    runner, channel = runner_factory()
+    h(runner, {})
+    mock_agent_cls.assert_called_once_with(model=None, yolo=True, opts=["--max-turns", "5"])
+
+
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_opts_default_is_none(mock_agent_cls, runner_factory):
+    """opts defaults to None when not specified."""
+    mock_agent_cls.return_value = _mock_agent_prompt([
+        StreamEvent(type="result", content="ok"),
+    ])
+
+    h = cc_handler("/cmd")
+    runner, channel = runner_factory()
+    h(runner, {})
+    mock_agent_cls.assert_called_once_with(model=None, yolo=True, opts=None)
+
+
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_yolo_default_is_true(mock_agent_cls, runner_factory):
+    """yolo defaults to True for backward compatibility."""
+    mock_agent_cls.return_value = _mock_agent_prompt([
+        StreamEvent(type="result", content="ok"),
+    ])
+
+    h = cc_handler("/cmd")
+    runner, channel = runner_factory()
+    h(runner, {})
+    mock_agent_cls.assert_called_once_with(model=None, yolo=True, opts=None)
+
+
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_yolo_false_forwarded_to_agent(mock_agent_cls, runner_factory):
+    """yolo=False is forwarded to ClaudeCodeAgent."""
+    mock_agent_cls.return_value = _mock_agent_prompt([
+        StreamEvent(type="result", content="ok"),
+    ])
+
+    h = cc_handler("/cmd", yolo=False)
+    runner, channel = runner_factory()
+    h(runner, {})
+    mock_agent_cls.assert_called_once_with(model=None, yolo=False, opts=None)
+
+
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_opts_and_yolo_combined(mock_agent_cls, runner_factory):
+    """opts and yolo can be combined and both are forwarded."""
+    mock_agent_cls.return_value = _mock_agent_prompt([
+        StreamEvent(type="result", content="ok"),
+    ])
+
+    h = cc_handler("/cmd", yolo=False, opts=["--verbose"])
+    runner, channel = runner_factory()
+    h(runner, {})
+    mock_agent_cls.assert_called_once_with(model=None, yolo=False, opts=["--verbose"])
+
+
+@patch("antkeeper.handlers.claude_code.factories.extract_json", return_value={"x": "val"})
+@patch("antkeeper.handlers.claude_code.factories.run_prompt")
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_opts_with_state_updates_mode(mock_agent_cls, mock_rp, mock_ej, runner_factory):
+    """In extraction mode, opts is forwarded to primary agent; extraction uses its own hardcoded opts."""
+    mock_agent_cls.return_value = _mock_agent_prompt([
+        StreamEvent(type="result", content="raw output"),
+    ])
+    mock_rp.return_value = iter([
+        StreamEvent(type="result", content="{}"),
+    ])
+
+    h = cc_handler("/cmd", state_updates=["x"], opts=["--max-turns", "3"])
+    runner, channel = runner_factory()
+    h(runner, {})
+    # Primary agent gets handler opts
+    mock_agent_cls.assert_called_once_with(model=None, yolo=True, opts=["--max-turns", "3"])
+    # Extraction uses its own hardcoded opts, not the handler opts
+    assert mock_rp.call_args[1]["opts"] == ["--max-turns", "1"]
+
+
+@patch("antkeeper.handlers.claude_code.factories.ClaudeCodeAgent")
+def test_opts_empty_list_forwarded_as_is(mock_agent_cls, runner_factory):
+    """opts=[] is forwarded as-is, not converted to None."""
+    mock_agent_cls.return_value = _mock_agent_prompt([
+        StreamEvent(type="result", content="ok"),
+    ])
+
+    h = cc_handler("/cmd", opts=[])
+    runner, channel = runner_factory()
+    h(runner, {})
+    mock_agent_cls.assert_called_once_with(model=None, yolo=True, opts=[])

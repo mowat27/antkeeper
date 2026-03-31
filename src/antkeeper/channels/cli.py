@@ -47,8 +47,8 @@ class CliChannel:
         """
         if event.internal:
             return
-        logger.debug(f"{event.type.title()} [{run_id}]: {event.content}")
-        message = f"[{self.workflow_name}, {run_id}] {event.content}"
+        logger.debug(f"{event.type.title()} [{run_id}]: {event.to_json()}")
+        message = f"[{self.workflow_name}, {run_id}] {event.to_json()}"
         if event.type == "error":
             print(message, flush=True, file=sys.stderr)
         else:

@@ -262,6 +262,35 @@ The `env` dict contains static `str` values only (no callables). Values are acti
 
 The implementation wraps the handler body in `with _app_env(env):`, reusing the same context manager that handles App-level env. Handler-level env nests inside any App-level env that is already active.
 
+### Extra CLI Flags (opts)
+
+Pass `opts` to forward arbitrary CLI arguments verbatim to the underlying `ClaudeCodeAgent`. These are appended to the `claude` CLI invocation. If `opts` contains a flag that the agent would normally add from its convenience parameters (e.g. `--model`, `--dangerously-skip-permissions`, `--output-format`), the agent skips adding those, so `opts` can safely override any built-in flag.
+
+```python
+# Limit the number of agentic turns
+specify = cc_handler("/specify $prompt", opts=["--max-turns", "1"])
+
+# Allow only specific tools
+review = cc_handler("/review $pr_url", opts=["--allowedTools", "Bash,Read"])
+```
+
+`opts=None` (the default) adds no extra flags — fully backward compatible.
+
+### Permission Skipping (yolo)
+
+Pass `yolo=False` to require explicit permission grants from the user during the LLM call. The default is `yolo=True`, which passes `--dangerously-skip-permissions` to the CLI (backward-compatible behaviour).
+
+```python
+# Default — skip all permission prompts (backward compatible)
+implement = cc_handler("/implement $spec_file")
+
+# Require explicit permission grants
+careful = cc_handler("/deploy $target", yolo=False)
+
+# Combine with opts
+custom = cc_handler("/deploy", opts=["--allowedTools", "Bash"], yolo=False)
+```
+
 ### Model Override
 
 Pass `model` to pin a specific LLM model at factory time, overriding `state.get("model")`. When omitted, the handler falls back to the model from state.

@@ -97,6 +97,8 @@ cc_handler(
     label: str | None = None,                # Progress message label
     model: str | None = None,                # Override LLM model
     env: dict[str, str] | None = None,       # Per-handler env vars
+    opts: list[str] | None = None,           # Extra CLI flags forwarded verbatim to ClaudeCodeAgent
+    yolo: bool = True,                       # Controls --dangerously-skip-permissions (default True for backward compat)
 )
 ```
 
@@ -109,6 +111,8 @@ cc_handler(
 | `label` | First token of command | Human-readable label for progress messages. E.g. `cc_handler("/sdlc:implement $spec_file", label="implement")`. |
 | `model` | `state.get("model")` | Pin a specific LLM model for this handler, ignoring whatever model is in state. |
 | `env` | `None` | Environment variables set only for this handler's execution. Merges with App-level env (handler values win). |
+| `opts` | `None` | List of extra CLI flags forwarded verbatim to `ClaudeCodeAgent`. E.g. `opts=["--max-turns", "5"]`. `ClaudeCodeAgent` handles deduplication — if `opts` contains `--model`, `--dangerously-skip-permissions`, `--output-format`, or `--verbose`, the agent skips adding those from its convenience params. |
+| `yolo` | `True` | Controls whether `--dangerously-skip-permissions` is passed to the Claude CLI. Defaults to `True` for backward compatibility. Set to `False` for handlers that should prompt for permissions. |
 
 **Extraction mode detail:** When `state_updates` is set, after the primary LLM call completes, the factory sends the response to haiku with `--max-turns 1` asking it to extract the specified fields as JSON. The extraction events are marked `internal=True` so channels can filter them. The extracted dict is merged into state.
 
@@ -207,6 +211,16 @@ def my_llm_step(runner: Runner, state: State) -> State:
 ```
 
 Each `StreamEvent` has: `type` (progress/assistant/tool/result/rate_limit/error), `content`, `metadata` (usage, cost, session_id on result events), `internal` flag, and a `to_json()` method.
+
+**CLI flag control in hand-written handlers:** `run_prompt()` accepts an `opts` parameter for arbitrary CLI flags (e.g. `run_prompt(prompt, logger, model=model, opts=["--max-turns", "1"])`). Note that `run_prompt()` hardcodes `yolo=True` and does not expose it — it is a convenience wrapper for the common case. For full control (including `yolo=False`), construct `ClaudeCodeAgent` directly:
+
+```python
+from antkeeper.llm.claude_code import ClaudeCodeAgent
+
+agent = ClaudeCodeAgent(model=state.get("model"), yolo=False, opts=["--allowedTools", "Bash"])
+for event in agent.prompt("Do something carefully"):
+    runner.channel.report(runner.id, event)
+```
 
 ---
 

@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-31 (enhancement/cc-handler-verbose-mode)
+# Last validated: 2026-03-31 (merge: cc-handler-verbose-mode + cc-handler-cli-parity)
 
 overview:
   name: antkeeper
@@ -264,10 +264,9 @@ core_objects:
       pre-registered handlers at construction time. log_dir can be a callable accepting
       (runner) — resolved by Runner.__init__ at construction time. env values can be
       callables accepting (runner) — resolved by Runner.run() before passing to _app_env.
-      Callable resolution happens per-run so values like runner.id are available. env is
-      consumed by Runner.run() via _app_env context manager — not applied by App itself.
-      Thread-safety note: env vars are process-global; concurrent Runner instances in the
-      same process could conflict (acceptable for current single-threaded execution model).
+      Callable resolution happens per-run so values like runner.id are available. env consumed
+      by Runner.run() via _app_env — not applied by App itself. env vars are process-global;
+      concurrent Runner instances could conflict (acceptable for single-threaded model).
 
   _app_env:
     file: src/antkeeper/core/app.py
@@ -280,7 +279,7 @@ core_objects:
       before the block are deleted (not set to None) on restore. Callable env values
       are already resolved by Runner.run() before _app_env is called — _app_env only
       sees plain values. Not exported from __init__.py — implementation detail.
-    behavior: "If not env: no-op. Saves originals, sets each via str(v). finally: restores or pops if original was None."
+    behavior: "No-op if env is None/empty. Sets each via str(v). Restores or pops on exit (finally)."
 
   Runner:
     file: src/antkeeper/core/runner.py
@@ -518,7 +517,7 @@ helper_functions:
 handler_factories:
   cc_handler:
     file: src/antkeeper/handlers/claude_code/factories.py
-    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None, env: dict[str, str] | None = None, verbose: bool = False) -> Handler"
+    signature: "cc_handler(command: str, *, state_updates: list[str] | None = None, label: str | None = None, model: str | None = None, env: dict[str, str] | None = None, verbose: bool = False, opts: list[str] | None = None, yolo: bool = True) -> Handler"
     returns: "Handler Protocol — callable (Runner, State) -> State with __name__ attribute"
     responsibility: >
       Factory producing (Runner, State) -> State handler functions in two modes:
@@ -568,6 +567,13 @@ handler_factories:
       env_handling: >
         env provided -> handler body executes inside _app_env(env). Handler env wins over
         App-level env. Static str only. env=None is a no-op.
+      opts_handling: >
+        opts forwarded verbatim to ClaudeCodeAgent. None (default) = no extra flags.
+        opts=[] forwarded as-is. Handler opts are NOT passed to the extraction step;
+        extraction always uses its own hardcoded ["--max-turns", "1"].
+      yolo_handling: >
+        yolo=True (default) passes --dangerously-skip-permissions to ClaudeCodeAgent.
+        yolo=False omits the flag. Backward compatible: all existing calls default to True.
       progress: "Reports Running {label} before and {label} complete after."
   handlers_package_exports:
     file: src/antkeeper/handlers/claude_code/__init__.py
@@ -812,7 +818,7 @@ data_flow:
     - "Handler interpolates $var placeholders from state via regex"
     - "Step 1: Calls run_prompt(interpolated_command, runner.logger, model=primary_model)"
     - "run_prompt creates ClaudeCodeAgent(model=model, yolo=True), calls agent.prompt()"
-    - "Agent runs subprocess `claude --output-format json -p` -> parses JSON envelope, returns data['result']"
+    - "Agent runs subprocess `claude --output-format stream-json -p` -> reads JSONL line-by-line, yields StreamEvent instances"
     - "If fire-and-forget (no state_updates): returns state unchanged"
     - "If extraction mode (state_updates non-empty): Step 2 — calls run_prompt(_extraction_prompt(response, required_fields=state_updates), runner.logger, model='haiku')"
     - "extract_json parses extraction response, picks only listed fields, merges into state"
@@ -820,8 +826,7 @@ data_flow:
     - "sdlc_iso calls derive_feature to get feature_type and slug"
     - "Creates Worktree(base_dir=runner.app.worktree_dir, name='{timestamp}-{run_id}')"
     - "Enters git_worktree(wt, create=True, branch='{feature_type}/{slug}', remove=False)"
-    - "Inside worktree: runs specify -> implement -> document via run_workflow"
-    - "On exit: cwd restored, worktree kept on disk for inspection"
+    - "Inside worktree: runs specify -> implement -> document via run_workflow; cwd restored on exit"
     - "Returns state with worktree_path and branch_name added"
   slack_happy_path:
     - "User @mentions bot in Slack channel with workflow name"
@@ -896,7 +901,7 @@ testing_design:
     - tests/git/test_context.py — git_worktree context manager (create, cwd, yield, restore, remove)
     - tests/git/test_core.py — execute() stdout capture, GitCommandError on failure, empty output handling
     - tests/git/test_branch.py — current() default branch, switched branch, detached HEAD state
-    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline, extraction mode (haiku + max-turns 1), fire-and-forget mode, $var interpolation, model override, error handling, handler-level env, _should_report unit tests (result/error pass; assistant/tool/rate_limit suppressed in default mode; verbose=True forwards all; empty content always suppressed), verbose mode integration tests
+    - tests/handlers/test_factories.py — cc_handler: label derivation, streaming pipeline, extraction mode (haiku + max-turns 1), fire-and-forget mode, $var interpolation (${var} NOT interpolated), model override (factory beats state), error handling (KeyError/AgentExecutionError/ValueError -> runner.fail), handler-level env (set/restore), _should_report unit tests (result/error pass; assistant/tool/rate_limit suppressed in default mode; verbose=True forwards all; empty content always suppressed), verbose mode integration tests, opts forwarded to agent (empty list as-is, extraction isolation), yolo default True + yolo=False forwarding
     - tests/test_tracing.py — OTel tracing: test-scoped TracerProvider with _InMemoryExporter, TestRunnerRunSpan (root span attributes, error recording), TestRunWorkflowSpans (step spans, hierarchy, error recording), TestLLMCallSpan (LLM call span attributes, error recording)
     - tests/llm/test_run_prompt.py — run_prompt: returns Iterator[StreamEvent], delegates to ClaudeCodeAgent with yolo=True, passes model/opts
     - tests/core/test_loader.py — TestLoadApp: returns app object, FileNotFoundError on missing file, AttributeError on missing app attr
@@ -948,8 +953,10 @@ key_design_decisions:
     (e.g. extraction middleware). Fire-and-forget (no state_updates) = empty pipeline. Extraction
     mode = pipeline with _extraction_middleware (haiku + --max-turns 1) that splices internal
     extraction events after each result event. Factory model overrides state['model']; extraction
-    always uses haiku. Handler __name__ set to label for app.add_handler(). See handler_factories
-    section for full detail.
+    always uses haiku. opts forwarded verbatim to primary ClaudeCodeAgent only (not extraction).
+    yolo=True (default) for backward compatibility; yolo=False skips permission flag. Internal
+    events (internal=True) are forwarded to channel but channels suppress them from user output.
+    Handler __name__ set to label for app.add_handler(). See handler_factories section for full detail.
   - >
     Git worktree isolation. sdlc_iso creates a worktree per run on
     {feature_type}/{slug}, enabling parallel feature dev without cwd/branch
