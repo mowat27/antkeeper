@@ -183,10 +183,17 @@ architecture:
     (3) ClaudeCodeAgent.prompt() — child span "antkeeper.llm.call" with
     prompt_length (before), session_id/duration_ms/input_tokens/output_tokens/
     total_cost_usd/model (after). All spans record exceptions and set ERROR
-    status on failure. Activated by wrapping commands with opentelemetry-instrument
-    (e.g. opentelemetry-instrument antkeeper run ...); no-op tracer without it.
-    No TracerProvider setup in library code — deployer's responsibility.
-    OTel packages are core dependencies.
+    status on failure. TracerProvider is configured programmatically at startup
+    (not via opentelemetry-instrument). No TracerProvider setup in library code —
+    entry points (cli.py, server.py) are responsible. OTel packages are core
+    dependencies.
+    Cross-trace correlation: CC subprocesses run in separate processes with their
+    own TracerProviders and separate trace_ids. Context is injected into the
+    subprocess environment via opentelemetry.propagate.inject() in
+    ClaudeCodeAgent.prompt(), but CC does not propagate traceparent into its own
+    spans. The join key between antkeeper and CC traces is session_id — the
+    antkeeper.llm.call span carries session_id as a span attribute, and CC events
+    in Axiom carry attributes.session.id with the same value.
 
   state_persistence: >
     Automatic JSON-based state snapshots. Runner writes state to
