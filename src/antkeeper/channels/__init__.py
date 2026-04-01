@@ -8,6 +8,7 @@ in various contexts:
 - CliChannel: Command-line interface environments (stdout/stderr)
 - ApiChannel: Web servers and HTTP APIs (server logs)
 - SlackChannel: Slack workspace threads (via Slack Web API)
+- ProgrammaticChannel: In-process execution with callback-based event delivery
 
 Channels encapsulate I/O and state initialization, keeping workflow handlers
 environment-agnostic.

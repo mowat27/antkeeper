@@ -20,7 +20,7 @@ channel_protocol:
   attributes:
     - name: type
       type: str
-      purpose: Identifies channel kind - "cli", "api", or "slack"
+      purpose: Identifies channel kind - "cli", "api", "slack", or "programmatic"
     - name: workflow_name
       type: str
       purpose: Name of the workflow handler to invoke
@@ -142,13 +142,52 @@ implementations:
       Uses synchronous httpx because handler code runs in threadpool via
       asyncio.to_thread.
 
+  programmatic_channel:
+    file: src/antkeeper/channels/programmatic.py
+    class: ProgrammaticChannel
+    type_value: programmatic
+    init_params:
+      - "on_progress: Callable[[str, StreamEvent], None] | None = None"
+      - "on_error: Callable[[str, str], None] | None = None"
+    primary_method:
+      name: run_handler
+      signature: "run_handler(workflow_name: str, initial_state: dict[str, Any] | None = None, handlers_file: str = 'handlers.py') -> dict[str, Any]"
+      behaviour: >
+        Loads app via load_app(handlers_file), creates a private _InnerChannel,
+        creates Runner(app, inner), calls runner.run(), returns final state dict.
+        Each call is fully self-contained - no shared state between calls.
+      raises: [WorkflowFailedError, FileNotFoundError, AttributeError, ValueError]
+    inner_class: _InnerChannel
+    inner_class_notes: >
+      Private implementation detail. Created per run_handler() call to satisfy
+      the Channel protocol (which requires workflow_name and initial_state as
+      instance attributes). External callers must never import or instantiate it.
+    inner_report_logic: |
+      1. Skip if event.internal is True
+      2. Skip if not event.content
+      3. If event.type == "error": call on_error(run_id, event.content) if set
+      4. Else: call on_progress(run_id, event) if set
+      (No verbose mode - callers receive all non-internal events and filter themselves)
+    construction_site: >
+      External Python code (e.g. Overloop). Caller constructs ProgrammaticChannel
+      directly and calls run_handler() per workflow execution. No construction site
+      within the antkeeper codebase itself.
+    use_case: >
+      In-process execution without CLI or HTTP. Enables embedding antkeeper
+      workflow execution in other Python programs with callback-based event delivery.
+    error_handling: >
+      No exception swallowing. WorkflowFailedError and all other exceptions
+      propagate directly to the caller. No sys.exit calls.
+
 # ---------------------------------------------------------------------------
 # Verbose Mode
 # ---------------------------------------------------------------------------
 verbose_mode:
   description: >
     Controls event filtering in report(). Owned by channels, not handlers.
-    Each channel accepts verbose as a keyword-only bool in __init__.
+    CLI, API, and Slack accept verbose as a keyword-only bool in __init__.
+    ProgrammaticChannel has no verbose mode - callers receive all non-internal
+    events and filter themselves.
   behaviour:
     verbose_true: >
       All events with content are shown (after internal filter).
@@ -164,6 +203,7 @@ verbose_mode:
     cli: "--verbose flag on 'run' and 'resume' commands"
     api: "Not currently configurable - defaults to False"
     slack: "ANTKEEPER_SLACK_VERBOSE env var ('1' or 'true', case-insensitive)"
+    programmatic: "N/A - no verbose mode; all non-internal events delivered via callbacks"
 
 # ---------------------------------------------------------------------------
 # Runner Integration
@@ -237,6 +277,16 @@ construction_sites:
       thread_ts: from event
       verbose: "os.environ.get('ANTKEEPER_SLACK_VERBOSE') in ('1', 'true')"
     execution: "asyncio.to_thread(run_workflow_background, runner)"
+
+  programmatic:
+    file: "external (e.g. Overloop's handlers)"
+    constructs: ProgrammaticChannel
+    params_passed:
+      on_progress: "optional Callable[[str, StreamEvent], None]"
+      on_error: "optional Callable[[str, str], None]"
+    execution: >
+      Caller calls channel.run_handler(workflow_name, initial_state, handlers_file).
+      Runs synchronously in the caller's thread.
 
 # ---------------------------------------------------------------------------
 # Slack Event Processing

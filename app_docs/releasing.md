@@ -57,6 +57,20 @@ from antkeeper import (
 
 All channel implementations are core dependencies and always available.
 
+`ProgrammaticChannel` is importable directly from its module:
+
+```python
+from antkeeper.channels.programmatic import ProgrammaticChannel
+```
+
+It is not yet re-exported from the top-level `antkeeper` namespace. Add it to `src/antkeeper/__init__.py` before the next release:
+
+```python
+from antkeeper.channels.programmatic import ProgrammaticChannel
+```
+
+and include it in `__all__`.
+
 **Namespace policy**: The top-level `antkeeper` namespace is reserved for high-level workflow constructs (App, Runner, Channel implementations, State). Lower-level utilities are accessed via submodules:
 - Git utilities: `from antkeeper.git import execute, current, GitCommandError`
 - LLM agents: `from antkeeper.llm.claude_code import ClaudeCodeAgent, run_prompt`
@@ -176,7 +190,7 @@ Before publishing to PyPI:
 
 1. **Update version** in `pyproject.toml`
 2. **Run quality checks**: `just` (lint + typecheck + test)
-3. **Verify imports**: `python -c "from antkeeper import App, Runner, run_workflow, CliChannel, State, Channel, WorkflowFailedError, ApiChannel, SlackChannel, Worktree, git_worktree, make_log_dir, make_timestamp; print('All imports OK')"`
+3. **Verify imports**: `python -c "from antkeeper import App, Runner, run_workflow, CliChannel, State, Channel, WorkflowFailedError, ApiChannel, SlackChannel, ProgrammaticChannel, Worktree, git_worktree, make_log_dir, make_timestamp; print('All imports OK')"` (ensure `ProgrammaticChannel` has been added to `__init__.py` first)
 4. **Test CLI invocation**: `python -m antkeeper` (should print help), `antkeeper init` (should scaffold handlers.py)
 5. **Build package**: `uv build`
 6. **Test installation**: `uv pip install dist/antkeeper-*.whl` in a fresh venv
