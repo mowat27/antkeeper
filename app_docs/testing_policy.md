@@ -77,7 +77,8 @@ tests/
 │   ├── test_loader.py # load_app() unit tests
 │   └── test_resume.py # _load_state_by_run_id state loading tests
 ├── channels/          # Tests for src/antkeeper/channels/
-│   └── test_slack_channel.py  # SlackChannel unit tests
+│   ├── test_slack_channel.py  # SlackChannel unit tests
+│   └── test_programmatic.py   # ProgrammaticChannel and _InnerChannel unit tests
 ├── handlers/          # Tests for src/antkeeper/handlers/
 │   ├── test_claude_code.py    # Claude Code handler registration tests
 │   ├── test_factories.py      # cc_handler factory unit tests
@@ -678,3 +679,85 @@ def test_worktree_create(git_repo):
     wt.create(branch="feat/new")
     assert wt.exists
 ```
+
+### ProgrammaticChannel Testing Patterns
+
+Tests for `ProgrammaticChannel` and `_InnerChannel` (`tests/channels/test_programmatic.py`) split into two concerns: callback routing (pure unit tests) and end-to-end `run_handler()` execution (integration tests using real but minimal handler files).
+
+**`_InnerChannel` unit tests** — no Runner, no file I/O, no `App`. Construct `_InnerChannel` directly with `MagicMock` callbacks and assert routing behaviour:
+
+```python
+from unittest.mock import MagicMock
+from antkeeper.channels.programmatic import _InnerChannel
+from antkeeper.core.domain import StreamEvent
+
+def test_report_progress_calls_on_progress():
+    on_progress = MagicMock()
+    inner = _InnerChannel("wf", {}, on_progress=on_progress, on_error=None)
+    event = StreamEvent(type="progress", content="step done")
+    inner.report("run1", event)
+    on_progress.assert_called_once_with("run1", event)
+
+def test_report_error_calls_on_error():
+    on_error = MagicMock()
+    inner = _InnerChannel("wf", {}, on_progress=None, on_error=on_error)
+    inner.report("run1", StreamEvent(type="error", content="broke"))
+    on_error.assert_called_once_with("run1", "broke")  # string, not event
+```
+
+Key routing rules to cover:
+- Internal events (`event.internal=True`) are silently discarded — neither callback is invoked
+- Events with empty content (`event.content=""`) are silently discarded
+- Error events go to `on_error` with the string content, not the event object
+- All non-error types (`"assistant"`, `"result"`, `"tool"`, `"progress"`) go to `on_progress` with the event object
+- Both callbacks being `None` must not raise
+
+**`ProgrammaticChannel.run_handler()` integration tests** — write minimal real handler modules to temporary files. Use `tempfile.NamedTemporaryFile` with `delete=False` and clean up with `os.unlink` in a `finally` block:
+
+```python
+import os
+import tempfile
+from antkeeper.channels.programmatic import ProgrammaticChannel
+
+def _write_handlers_file(code: str) -> str:
+    f = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
+    f.write(code)
+    f.flush()
+    f.close()
+    return f.name
+
+def test_run_handler_returns_final_state():
+    path = _write_handlers_file("""\
+from antkeeper.core.app import App
+app = App()
+
+@app.handler
+def greet(runner, state):
+    return {**state, "greeting": "hello"}
+""")
+    try:
+        result = ProgrammaticChannel().run_handler("greet", handlers_file=path)
+        assert result["greeting"] == "hello"
+        assert "run_id" in result
+    finally:
+        os.unlink(path)
+```
+
+**Why real handler files instead of mocks** — `run_handler()` calls `load_app()` which imports a Python module. There is no meaningful way to mock this; the test must write a real (though minimal) Python file. Using `suffix=".py"` ensures the import mechanism recognises the file as a Python module.
+
+**State isolation** — verify that successive `run_handler()` calls produce independent `run_id` values and do not share state from earlier calls:
+
+```python
+result1 = channel.run_handler("add_key", initial_state={"base": 1}, handlers_file=path)
+result2 = channel.run_handler("add_key", initial_state={"base": 1}, handlers_file=path)
+assert result2["run_id"] != result1["run_id"]
+```
+
+**Initial state immutability** — pass a dict as `initial_state`, keep a reference before the call, and assert the dict is unchanged after `run_handler()` returns. `_InnerChannel.__init__` copies the dict with `{**initial_state}` to guarantee this.
+
+**Error propagation** — test with `pytest.raises`:
+- `WorkflowFailedError` when the handler calls `runner.fail()`
+- `FileNotFoundError` when `handlers_file` does not exist (no temp file needed)
+- Any `Exception` when `workflow_name` is not registered in the app
+
+**`handlers_file` path resolution** — `load_app()` resolves paths relative to the process CWD. Tests that use absolute temp file paths are not affected by CWD. Tests for relative paths (e.g., `"handlers.py"`) must either change CWD or pass an absolute path. Prefer absolute paths in tests to avoid CWD coupling.

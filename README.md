@@ -71,7 +71,7 @@ The same workflow runs from an HTTP webhook or a CI job. With a Slack app config
 
 **Runner** is the execution context for a single workflow run. It binds an `App` (handler registry) to a `Channel` (I/O boundary) and manages the run lifecycle: generating a unique run ID, setting up per-run file logging, persisting state, and resolving environment variables. Handlers use the runner to communicate back to the channel (`runner.report_progress()`, `runner.report_error()`) and to signal failure (`runner.fail()`). The runner is passed to every handler but handlers do not need to manage it — it is infrastructure.
 
-**Channels** are I/O adapters. They decouple workflow logic from how it is triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel posts to threads (requires your own Slack app — see below). Handlers do not need to know which channel is active.
+**Channels** are I/O adapters. They decouple workflow logic from how it is triggered and how it reports progress. The CLI channel reads from the terminal and writes to stdout. The API channel accepts HTTP POST requests and runs workflows in the background. The Slack channel posts to threads (requires your own Slack app — see below). The Programmatic channel runs workflows directly in-process from Python code, returning the final state as a dict and routing events to optional callbacks. Handlers do not need to know which channel is active.
 
 **Agents** are the LLM abstraction. Any object with a `prompt(str) -> Iterator[StreamEvent]` method qualifies. The built-in `ClaudeCodeAgent` delegates to the Claude CLI using `--output-format stream-json`, streaming events as they arrive. The protocol is deliberately minimal — plug in any backend. The `cc_handler` factory is a convenience method built on this protocol, but hand-written handlers can use it directly via `run_prompt()`.
 
@@ -142,6 +142,28 @@ curl -X POST http://localhost:8000/webhook \
 ```
 
 For Slack integration (requires your own Slack app), set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env` file and start the server. See [Slack Integration](app_docs/slack.md).
+
+## Programmatic Usage
+
+Run workflows directly from Python without a CLI or server:
+
+```python
+from antkeeper.channels.programmatic import ProgrammaticChannel
+
+channel = ProgrammaticChannel(
+    on_progress=lambda run_id, event: print(f"[{run_id}] {event.content}"),
+    on_error=lambda run_id, message: print(f"[{run_id}] ERROR: {message}"),
+)
+
+result = channel.run_handler(
+    "my_workflow",
+    {"prompt": "Add auth"},
+    handlers_file="handlers.py",
+)
+print(result)  # final state dict
+```
+
+`run_handler()` is synchronous and self-contained. Each call loads the handlers file, runs the workflow, and returns the final state. `WorkflowFailedError` and all other exceptions propagate directly to the caller. Callbacks are optional — omit them to run silently. The `handlers_file` path is resolved relative to process CWD.
 
 ## Design Principles
 

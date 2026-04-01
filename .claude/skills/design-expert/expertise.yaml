@@ -64,9 +64,10 @@ architecture:
         and owns how progress/errors are reported and what initial state is
         supplied. Channels are the seam where tests swap in doubles.
       modules:
-        - cli.py    # CliChannel for command-line execution
-        - api.py    # ApiChannel for HTTP API execution
-        - slack.py  # SlackChannel for Slack thread-based execution
+        - cli.py           # CliChannel for command-line execution
+        - api.py           # ApiChannel for HTTP API execution
+        - slack.py         # SlackChannel for Slack thread-based execution
+        - programmatic.py  # ProgrammaticChannel for in-process execution with callbacks
 
     - name: llm
       path: src/antkeeper/llm/

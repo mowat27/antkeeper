@@ -13,7 +13,8 @@ src/antkeeper/
 ├── channels/
 │   ├── cli.py          # CLI channel adapter (stdout/stderr reporting)
 │   ├── api.py          # API channel adapter (server logging)
-│   └── slack.py        # Slack channel adapter (thread replies)
+│   ├── slack.py        # Slack channel adapter (thread replies)
+│   └── programmatic.py # Programmatic channel (in-process execution with callbacks)
 ├── git/                # Git integration
 │   ├── core.py         # Low-level command execution (execute, GitCommandError)
 │   ├── branch.py       # Branch operations (current)
@@ -51,11 +52,12 @@ src/antkeeper/
 
 Channels are I/O boundary adapters. They own how progress and errors are reported and what initial state is supplied. This is the primary extension point for new I/O adapters.
 
-The framework ships three channels:
+The framework ships four channels:
 
 - **CliChannel** — writes to stdout/stderr for terminal usage
 - **ApiChannel** — writes to stdout/stderr for server logs
 - **SlackChannel** — posts progress and results to Slack threads
+- **ProgrammaticChannel** — runs workflows in-process from Python code; routes events to optional `on_progress` and `on_error` callbacks; returns final state as a dict; exceptions propagate to the caller
 
 ### App
 
@@ -339,6 +341,15 @@ def isolated_workflow(runner: Runner, state: State) -> State:
 3. Server dispatches the workflow using `SlackChannel` bound to the originating thread
 4. Workflow progress and results are posted as thread replies
 5. Errors are reported back to the Slack thread
+
+### Programmatic Execution
+
+1. Caller constructs `ProgrammaticChannel(on_progress=..., on_error=...)` with optional callbacks
+2. Caller invokes `channel.run_handler(workflow_name, initial_state, handlers_file)`
+3. `run_handler()` calls `load_app(handlers_file)`, creates an internal `_InnerChannel`, and runs the workflow synchronously
+4. Non-internal events with non-empty content are routed: error events call `on_error(run_id, message_str)`; all others call `on_progress(run_id, event)`
+5. The final state dict is returned to the caller
+6. `WorkflowFailedError` and any other exceptions propagate directly — the caller controls error handling
 
 ## Logging and State Persistence
 

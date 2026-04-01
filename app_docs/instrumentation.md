@@ -16,6 +16,7 @@ def my_step(runner: Runner, state: State) -> State:
 - **CliChannel**: Writes to stdout (errors to stderr) with format `[workflow_name, run_id] message`. In non-verbose mode (default) only `progress` and `error` events are shown, rendered as plain text. In verbose mode all events are shown, rendered as JSON (`event.to_json()`). Internal events and events with empty content are always suppressed.
 - **ApiChannel**: Same filtering and rendering as CliChannel. Progress goes to stdout; errors go to stderr (visible in server logs).
 - **SlackChannel**: Posts to Slack thread via httpx sync POST. Same event-type filtering as CliChannel, but always renders as plain text (`event.content`) regardless of verbose mode, for thread readability.
+- **ProgrammaticChannel**: Routes events to optional `on_progress` and `on_error` callbacks. No `verbose` parameter — callers receive all non-internal events with non-empty content and filter themselves. Error events call `on_error(run_id, message_str)`; all other events call `on_progress(run_id, event)`. Silent no-op when callbacks are not provided.
 - **TestChannel**: Appends all events to `events: list[StreamEvent]`. Progress events also go to `progress_messages`; error events go to `error_messages`. Captures all events unconditionally — not affected by verbose.
 
 ## Error Reporting
@@ -46,7 +47,7 @@ All channels implement `report(run_id: str, event: StreamEvent) -> None`. The `S
 | `metadata` | `dict[str, Any] \| None` | Structured data (usage, cost, rate limit fields). |
 | `internal` | `bool` | `True` for housekeeping calls (e.g. extraction step). Defaults to `False`. |
 
-All channels suppress events with `event.internal=True` (housekeeping calls such as the extraction step). Each channel also filters by event type based on its `verbose` constructor parameter: when `verbose=False` (default), only `progress` and `error` events with non-empty content are displayed; when `verbose=True`, all events with non-empty content are displayed. The `TestChannel` captures all events unconditionally for test assertion.
+All channels suppress events with `event.internal=True` (housekeeping calls such as the extraction step). Each channel also filters by event type based on its `verbose` constructor parameter: when `verbose=False` (default), only `progress` and `error` events with non-empty content are displayed; when `verbose=True`, all events with non-empty content are displayed. `ProgrammaticChannel` is an exception: it has no `verbose` parameter and passes all non-internal events with non-empty content directly to the caller's callbacks for caller-side filtering. The `TestChannel` captures all events unconditionally for test assertion.
 
 ## Run Identification
 
