@@ -12,6 +12,7 @@ Exports:
     current: Get the name of the current git branch.
 """
 
+from antkeeper.git import branch
 from antkeeper.git.branch import current
 from antkeeper.git.core import GitCommandError, execute, latest_commit
 from antkeeper.git.worktrees import Worktree, WorktreeError, git_worktree
@@ -20,6 +21,7 @@ __all__ = [
     "GitCommandError",
     "Worktree",
     "WorktreeError",
+    "branch",
     "current",
     "execute",
     "git_worktree",
