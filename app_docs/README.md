@@ -6,7 +6,7 @@ This directory contains policy and pattern documentation for the Antkeeper workf
 
 - **reference.md** - Comprehensive reference guide covering project structure, core concepts in detail, writing handlers (decorator pattern, cc_handler factory, and the ralph retry-with-validation wrapper), LLM integration, git utilities, data flow for all channels (CLI, API, Slack, Programmatic), logging and state persistence, CLI commands, and codebase navigation. This is where readers go after the main README for detailed technical reference.
 
-- **releasing.md** - Packaging, dependency management, and PyPI release process. Covers core dependencies (all runtime deps including OTel packages), public API exports (including `ProgrammaticChannel`), entry points (CLI script and Python module), environment variables (`ANTKEEPER_HANDLERS_FILE`), package metadata, build system (uv_build), release checklist, publishing to PyPI, post-release verification, and version numbering strategy.
+- **releasing.md** - Packaging, dependency management, and PyPI release process. Covers core dependencies (all runtime deps including OTel packages), public API exports (including `Handler` and `ProgrammaticChannel`), entry points (CLI script and Python module), environment variables (`ANTKEEPER_HANDLERS_FILE`), package metadata, build system (uv_build), release checklist, publishing to PyPI, post-release verification, and version numbering strategy.
 
 - **standards.md** - Engineering standards that guide framework decisions. Covers dependency philosophy (not a micro-library — add core deps without hesitation) and performance philosophy (LLM calls dominate; never optimise framework internals for speed).
 

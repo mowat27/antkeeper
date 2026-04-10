@@ -275,6 +275,26 @@ def test_something(app, runner_factory):
     # State files go to app.state_dir (temp directory)
 ```
 
+### App Decorator Registry Testing Patterns
+
+Tests for the `@app.handler` decorator's registry behaviour live in `tests/core/test_app.py`:
+
+- `test_handler_decorator_stores_wrapper_in_registry` — After `@app.handler`, `app.handlers[name]` is the wrapper, not the raw function (`app.handlers[name] is not raw_fn`).
+- `test_handler_decorator_registry_and_return_are_same_object` — The object returned by `app.handler(fn)` and the object stored in `app.handlers[fn.__name__]` are the same (`is` check). This means the decorated name and the registry lookup always refer to the same callable.
+
+These tests verify the identity invariant introduced by the refactor that unified the `Handler` protocol: storing the wrapper (not the raw function) in the registry ensures `get_handler()` returns the same object as the decorated name.
+
+### Handler Composability Testing Patterns
+
+Tests for composing handlers across `@app.handler`, `cc_handler`, `ralph`, and `run_workflow` live in `tests/core/test_workflows.py` in the `TestHandlerComposability` class:
+
+- `test_decorated_handler_usable_in_run_workflow` — a `@app.handler` decorated function passed as a step to `run_workflow` executes correctly.
+- `test_mixed_handler_sources_in_run_workflow` — a `steps` list containing a plain function (no decorator) and a decorated handler both execute in sequence.
+- `test_decorated_handler_composable_with_ralph` — `ralph(decorated_fn, validator=v)` produces a handler that runs correctly in `run_workflow`.
+- `test_ralph_wrapping_cc_handler_pattern` — a handler mimicking `cc_handler` output (plain function with `__name__` set), wrapped with `ralph`, runs in `run_workflow`. Verifies the full composition chain without requiring the Claude Code CLI.
+
+These tests assert that handlers from all three sources (`@app.handler`, `cc_handler`, and plain callables satisfying the `Handler` protocol) are interchangeable in `run_workflow` and `ralph`.
+
 ### App Environment Variable Testing Patterns
 
 Tests for the `App(env=...)` feature live in `tests/core/test_workflows.py` in the `TestAppEnvironment` class, alongside the workflow execution tests. Constructor-level tests (`test_app_constructor_stores_env`, `test_app_constructor_default_env_is_none`) live in `tests/core/test_app.py`.

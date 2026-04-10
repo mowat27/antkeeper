@@ -7,7 +7,7 @@ Detailed reference for the Antkeeper workflow framework. For an introduction to 
 ```
 src/antkeeper/
 ├── core/               # Framework kernel
-│   ├── domain.py       # State type alias, Channel protocol, WorkflowFailedError
+│   ├── domain.py       # State type alias, Channel protocol, Handler protocol, WorkflowFailedError
 │   ├── app.py          # App handler registry, run_workflow helper
 │   └── runner.py       # Runner execution engine
 ├── channels/
@@ -164,7 +164,7 @@ def sdlc(runner, state):
 
 ### Retry-with-Validation Wrapper (ralph)
 
-The `ralph()` factory wraps any handler with a retry-validation loop. It works with `@app.handler`-decorated handlers, `cc_handler`-built handlers, or any plain callable matching `(Runner, State) -> State`.
+The `ralph()` factory wraps any handler with a retry-validation loop. It works with `@app.handler`-decorated handlers, `cc_handler`-built handlers, or any plain callable satisfying the `Handler` protocol (`(Runner, State) -> State` with a `__name__` attribute).
 
 ```python
 from antkeeper.handlers.ralph import ralph, ValidationResult
@@ -181,13 +181,13 @@ wrapped = ralph(my_handler, validator=my_validator, max_retries=3)
 
 ```python
 ralph(
-    handler: Callable[[Runner, State], State],
+    handler: Handler,
     *,
     validator: Callable[[State], ValidationResult] | str,
     max_retries: int = 3,
     prompt_key: str = "prompt",
     label: str | None = None,
-) -> Callable[[Runner, State], State]
+) -> Handler
 ```
 
 **Parameters:**

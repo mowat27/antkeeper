@@ -8,6 +8,7 @@ The core framework consists of:
 - Runner: Workflow execution engine with logging and state persistence
 - State: Type alias for workflow data (dict[str, Any])
 - Channel: Protocol for I/O boundaries and workflow configuration
+- Handler: Protocol for workflow handler callables
 - WorkflowFailedError: Exception for signaling workflow failures
 
 State conventions
@@ -47,3 +48,9 @@ Typical usage::
     runner = Runner(app, channel)
     final_state = runner.run()
 """
+
+from antkeeper.core.domain import Handler
+
+__all__ = ["Handler"]
+# Handler is re-exported here so that ``from antkeeper.core import Handler``
+# works alongside the fuller import path ``antkeeper.core.domain.Handler``.
