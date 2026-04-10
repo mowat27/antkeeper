@@ -1,23 +1,32 @@
 """Application framework for registering and managing workflow handlers.
 
-This module provides:
-- _app_env: Context manager that temporarily sets os.environ variables for a block
-- App: Central registry for workflow handlers with decorator-based registration
-- run_workflow: Helper function for executing sequential handler chains
+Public API
+----------
+App
+    Central registry for workflow handlers with decorator-based registration.
+    Create one ``App`` instance per application, register handlers with
+    ``@app.handler``, then pass the instance to a ``Runner`` for execution.
+run_workflow
+    Helper function for executing an ordered chain of handler steps with
+    automatic progress tracking and resume support.
 
-The App class is the main entry point for defining workflows. Use the @app.handler
-decorator to register workflow functions, then pass the app to a Runner for execution.
+Internal helpers
+----------------
+_app_env
+    Context manager that temporarily sets ``os.environ`` variables for the
+    duration of a handler invocation and restores originals on exit.  Used
+    internally by ``Runner``; not part of the public API.
 """
 from __future__ import annotations
 
 import functools
 import os
 from contextlib import contextmanager
-from typing import Any, Callable, Generator, NoReturn, TYPE_CHECKING
+from typing import Any, Callable, Generator, TYPE_CHECKING
 
 from opentelemetry import trace
 
-from antkeeper.core.domain import State
+from antkeeper.core.domain import Handler, State
 
 if TYPE_CHECKING:
     from antkeeper.core.runner import Runner
@@ -114,7 +123,7 @@ class App:
         if handlers:
             self.handlers.update(handlers)
 
-    def add_handler(self, fn: Callable) -> None:
+    def add_handler(self, fn: Handler) -> None:
         """Register a function as a handler using its __name__ as the key.
 
         Programmatic equivalent of @app.handler. If a handler with the same
@@ -123,31 +132,31 @@ class App:
         Args:
             fn: The handler function to register.
         """
-        self.handlers[fn.__name__] = fn  # type: ignore[attr-defined]
+        self.handlers[fn.__name__] = fn
 
-    def handler(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+    def handler(self, fn: Handler) -> Handler:
         """Register a function as a workflow handler.
 
         This decorator registers a workflow handler function and wraps it for execution.
         The handler's name becomes its registry key for lookup by runners.
 
         Args:
-            fn: A callable that accepts a Runner and State and returns a State
-                or NoReturn (exits). The function's name is used as the handler key.
+            fn: A callable that accepts a Runner and State and returns a State.
+                The function's name is used as the handler key.
 
         Returns:
             The wrapped handler function that can be invoked by runners.
         """
         @functools.wraps(fn)
-        def wrapper(runner: Runner, state: State) -> State | NoReturn:
+        def wrapper(runner: Runner, state: State) -> State:
             """Invoke the wrapped handler, forwarding runner and state."""
             return fn(runner, state)
 
-        name: str = fn.__name__  # type: ignore[attr-defined]
-        self.handlers[name] = fn
+        name: str = fn.__name__
+        self.handlers[name] = wrapper
         return wrapper
 
-    def get_handler(self, name: str) -> Callable[[Runner, State], State | NoReturn]:
+    def get_handler(self, name: str) -> Handler:
         """Retrieve a registered handler by name.
 
         Args:
@@ -165,7 +174,7 @@ class App:
             raise ValueError(f"Unknown handler: {name}")
 
 
-def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, State], State]], skip: int = 0) -> State:
+def run_workflow(runner: Runner, state: State, steps: list[Handler], skip: int = 0) -> State:
     """Execute a sequence of workflow steps with state threading.
 
     Each step receives the runner and the current state, processes it, and
@@ -211,7 +220,7 @@ def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, Sta
     if skip == 0 and resume_skip > 0:
         skip = resume_skip
 
-    runner.logger.info(f"run_workflow started with {len(steps)} steps: {[getattr(s, '__name__', repr(s)) for s in steps]}")
+    runner.logger.info(f"run_workflow started with {len(steps)} steps: {[s.__name__ for s in steps]}")
     if skip > 0:
         runner.logger.info(f"Resuming: skipping {skip} completed steps")
     # Initialise progress and persist immediately so the state file reflects
@@ -220,7 +229,7 @@ def run_workflow(runner: Runner, state: State, steps: list[Callable[[Runner, Sta
     runner._persist_state(state)
     tracer = trace.get_tracer("antkeeper")
     for i, step in enumerate(steps[skip:], start=skip):
-        step_name = getattr(step, "__name__", repr(step))
+        step_name = step.__name__
         runner.logger.info(f"Executing step: {step_name}")
         with tracer.start_as_current_span(
             "antkeeper.workflow.step",

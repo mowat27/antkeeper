@@ -26,11 +26,10 @@ skipping (defaults to ``True`` for backward compatibility).
 import logging
 import re
 from collections.abc import Callable, Iterator
-from typing import Protocol
 
 from antkeeper.core.app import _app_env
 from antkeeper.core.runner import Runner
-from antkeeper.core.domain import State, StreamEvent
+from antkeeper.core.domain import Handler, State, StreamEvent
 from antkeeper.helpers.json import extract_json
 from antkeeper.llm.claude_code import ClaudeCodeAgent, run_prompt
 from antkeeper.llm.errors import AgentExecutionError
@@ -129,22 +128,6 @@ def _extraction_middleware(
                         internal=True,
                     )
     return middleware
-
-
-class Handler(Protocol):
-    """A handler callable with a ``__name__`` attribute.
-
-    Attributes:
-        __name__: Human-readable label used in progress messages and logging.
-
-    Methods:
-        __call__: Run the handler against the given runner and state, returning
-            updated state.
-    """
-
-    __name__: str
-
-    def __call__(self, runner: Runner, state: State, /) -> State: ...
 
 
 def cc_handler(

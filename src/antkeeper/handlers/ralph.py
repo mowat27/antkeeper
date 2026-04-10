@@ -10,20 +10,12 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Protocol
+from typing import TYPE_CHECKING, Callable
 
-from antkeeper.core.domain import State
+from antkeeper.core.domain import Handler, State
 
 if TYPE_CHECKING:
     from antkeeper.core.runner import Runner
-
-
-class _NamedHandler(Protocol):
-    """A handler callable that exposes a ``__name__`` attribute."""
-    __name__: str
-
-    def __call__(self, runner: Runner, state: State) -> State:
-        ...
 
 
 _Validator = Callable[["State"], "ValidationResult"]
@@ -108,13 +100,13 @@ def _state_diff(before: State, after: State) -> str:
 
 
 def ralph(
-    handler: _NamedHandler,
+    handler: Handler,
     *,
     validator: _Validator | str,
     max_retries: int = 3,
     prompt_key: str = "prompt",
     label: str | None = None,
-) -> _NamedHandler:
+) -> Handler:
     """Wrap a handler with a retry-validation loop.
 
     On each attempt the inner handler is called, then the validator is invoked.

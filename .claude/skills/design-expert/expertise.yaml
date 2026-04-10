@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-03-31 (branch: feature/ralph-retry-wrapper)
+# Last validated: 2026-04-10 (branch: refactor-unify-handler-protocol)
 
 overview:
   name: antkeeper
@@ -157,7 +157,7 @@ architecture:
       path: src/antkeeper/__init__.py
       responsibility: >
         Package-level re-exports. Exports all major public types via __all__:
-        App, Runner, run_workflow, State, Channel, WorkflowFailedError,
+        App, Runner, run_workflow, State, Channel, Handler, WorkflowFailedError,
         CliChannel, ApiChannel, SlackChannel, Worktree, git_worktree,
         make_log_dir, make_timestamp. Note: extract_json and json_prompt are
         NOT exported here; extract_json is imported directly from
@@ -266,6 +266,23 @@ domain_types:
       stderr; all others to stdout. This is the primary extension point for
       new I/O adapters.
 
+  Handler:
+    file: src/antkeeper/core/domain.py
+    definition: Protocol
+    attributes:
+      - "__name__: str"
+    methods:
+      - "__call__(self, runner: Runner, state: State) -> State"
+    notes: >
+      Canonical protocol for all workflow handler callables. Defined once in
+      core/domain.py and shared across the entire framework — cc_handler,
+      ralph(), App.handler decorator, and run_workflow all use this type.
+      No positional-only marker. Runner is imported under TYPE_CHECKING to
+      avoid a circular import. Exported from antkeeper.core and antkeeper
+      top-level package. Local handler protocols (_NamedHandler in ralph.py
+      and a local Handler in factories.py) were removed in favour of this
+      single definition.
+
 core_objects:
   App:
     file: src/antkeeper/core/app.py
@@ -278,12 +295,14 @@ core_objects:
       - "state_dir: str  # directory for per-run state JSON files"
       - "env: dict[str, Any | Callable[[Runner], Any]] | None  # optional env vars; values may be callables accepting (runner) returning the value"
     interface:
-      - "handler(fn) -> wrapper  # decorator that registers fn by fn.__name__"
-      - "add_handler(fn) -> None  # programmatic alternative to @app.handler decorator"
-      - "get_handler(name) -> Callable[[Runner, State], State | NoReturn]"
+      - "handler(fn: Handler) -> Handler  # decorator that wraps fn and registers the wrapper by fn.__name__"
+      - "add_handler(fn: Handler) -> None  # programmatic alternative to @app.handler decorator; stores fn directly"
+      - "get_handler(name) -> Handler"
     design_constraint: >
-      get_handler raises ValueError for unknown names. The decorator and add_handler()
-      both store the original fn in self.handlers. handlers constructor param merges
+      get_handler raises ValueError for unknown names. The decorator creates a functools.wraps
+      wrapper and stores the wrapper (not the raw fn) in self.handlers — so app.handlers[name]
+      and the decorated reference are the same callable object. add_handler() stores whatever
+      Handler is passed directly (pre-built factory outputs). handlers constructor param merges
       pre-registered handlers at construction time. log_dir can be a callable accepting
       (runner) — resolved by Runner.__init__ at construction time. env values can be
       callables accepting (runner) — resolved by Runner.run() before passing to _app_env.
@@ -334,10 +353,11 @@ core_objects:
 
   run_workflow:
     file: src/antkeeper/core/app.py
-    signature: "run_workflow(runner: Runner, state: State, steps: list[Callable], skip: int = 0) -> State"
+    signature: "run_workflow(runner: Runner, state: State, steps: list[Handler], skip: int = 0) -> State"
     responsibility: >
-      Sequential composition helper. Folds state through a list of handler
-      callables. Logs step names and completion via runner.logger.
+      Sequential composition helper. Folds state through a list of Handler callables.
+      Logs step names and completion via runner.logger. Uses step.__name__ directly
+      (no getattr fallback) — Handler protocol guarantees __name__ is always present.
     progress_tracking: >
       Before the first step, inserts _progress: {"total": len(steps), "completed": skip}
       into state and immediately calls runner._persist_state(). External observers can
@@ -581,13 +601,13 @@ handler_factories:
     file: src/antkeeper/handlers/ralph.py
     signature: |
       ralph(
-          handler: _NamedHandler,
+          handler: Handler,
           *,
           validator: _Validator | str,
           max_retries: int = 3,
           prompt_key: str = "prompt",
           label: str | None = None,
-      ) -> _NamedHandler
+      ) -> Handler
     returns: Handler callable with __name__ set to resolved label
     responsibility: >
       Factory that wraps any handler with a retry-validation loop. On each attempt the
@@ -595,15 +615,14 @@ handler_factories:
       feedback is appended to a progress log and the prompt is augmented with prior-attempts
       context before the next attempt. On exhaustion, runner.fail() raises WorkflowFailedError.
       Has zero LLM dependencies — wraps any callable matching (Runner, State) -> State with __name__.
+      Uses antkeeper.core.domain.Handler for parameter and return type (the local _NamedHandler
+      protocol has been removed).
     types:
       ValidationResult:
         kind: frozen dataclass
         fields:
           - "success: bool"
           - "feedback: str"
-      _NamedHandler:
-        kind: Protocol
-        description: "A handler callable with __name__: str attribute"
       _Validator:
         kind: type alias
         definition: "Callable[[State], ValidationResult]"
@@ -890,12 +909,12 @@ testing_design:
 
 key_design_decisions:
   - "Reducer pattern: handlers receive (runner, state) -> State. State is always a new dict (spread), never mutated, never shared between runs."
-  - "Channel and Agent are Protocols (structural subtyping, not ABCs). Channel.report(run_id, StreamEvent) is the single I/O method."
+  - "Channel, Handler, and Agent are Protocols (structural subtyping, not ABCs). Channel.report(run_id, StreamEvent) is the single I/O method. Handler is the single canonical type for all workflow callables — defined once in core/domain.py and shared by App, run_workflow, cc_handler, and ralph. No local handler protocols exist in handlers/."
   - "runner.fail() raises WorkflowFailedError (not exit). CLI catches and exits 1; API background task catches and continues serving."
   - "run_workflow enables composition without DAG: handlers call run_workflow with a step list."
   - "CLI loads user code dynamically via importlib (load_app); agents file must export `app`. Prompt from files or piped stdin into state['prompt']."
   - "cc_handler: verbosity filtering is the channel's concern, not the factory. All events forwarded unconditionally to runner.channel.report()."
-  - "ralph() wraps any (Runner,State)->State handler with __name__. Zero LLM dependencies. Exceptions propagate immediately (no retry)."
+  - "ralph() wraps any Handler (core protocol). Zero LLM dependencies. Exceptions propagate immediately (no retry). cc_handler(), @app.handler, and ralph() all produce and consume the same Handler type — full composition without casts."
   - "Git worktree isolation: one worktree per run on feature/slug branch. App.worktree_dir = 'trees/' default."
   - "Server factory: create_app() loads agents file, returns FastAPI. Routes defined inline in server.py; logic delegated to http/ package."
   - "Slack: debounce via SlackEventProcessor (instance-scoped pending store). SlackChannel uses sync httpx; server endpoint uses async httpx."

@@ -1,8 +1,12 @@
-"""Tests for App constructor handlers param and add_handler method.
+"""Tests for the App class public API.
 
-Verifies that App correctly stores handlers supplied at construction time,
-supports dynamic handler registration via add_handler, and manages the
-optional env parameter.
+Covers:
+
+* ``handlers`` constructor parameter — handlers dict supplied at build time.
+* ``add_handler`` — dynamic handler registration keyed by ``__name__``.
+* ``env`` constructor parameter — storage and default (``None``) behaviour.
+* ``@app.handler`` decorator — wrapping, registry storage, and identity of
+  the returned callable.
 """
 
 from antkeeper.core.app import App
@@ -57,3 +61,25 @@ def test_app_constructor_default_env_is_none():
     """Test that App defaults env to None when not provided."""
     app = App()
     assert app.env is None
+
+
+def test_handler_decorator_stores_wrapper_in_registry():
+    """After @app.handler, app.handlers[name] is the wrapper, not the raw function."""
+    app = App()
+
+    def raw_fn(runner, state):
+        return state
+
+    app.handler(raw_fn)
+    assert app.handlers["raw_fn"] is not raw_fn
+
+
+def test_handler_decorator_registry_and_return_are_same_object():
+    """decorated = app.handler(fn) and app.handlers[fn.__name__] are the same object."""
+    app = App()
+
+    def my_handler(runner, state):
+        return state
+
+    decorated = app.handler(my_handler)
+    assert app.handlers["my_handler"] is decorated

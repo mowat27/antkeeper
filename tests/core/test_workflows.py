@@ -1,7 +1,18 @@
 """Core workflow execution tests.
 
-Tests the framework's ability to execute single handlers, multi-step workflows,
-error handling, and handler resolution.
+Covers the full surface area of workflow execution in the Antkeeper framework:
+
+* Basic execution — single-handler and multi-step sequential workflows.
+* Error handling — ``WorkflowFailedError`` propagation and unknown handler lookup.
+* App environment — ``env`` lifecycle (set before handler, restored after success
+  and failure, callable env values, mixed static/callable maps).
+* Progress tracking — ``_progress`` injection, per-step increment, and initial
+  persistence to disk via ``run_workflow``.
+* Callable ``log_dir`` — resolver receives the Runner, resulting dir is created.
+* Skip / resume — ``skip`` parameter, ``_resume_skip`` state key, precedence rules.
+* Handler composability — plain functions, ``@app.handler`` decorated handlers,
+  ``ralph``-wrapped handlers, and handlers with ``**kwargs``, all usable as
+  ``run_workflow`` steps.
 """
 
 import json
@@ -633,3 +644,113 @@ class TestWorkflowSkip:
         result = runner.run()
         assert result["steps"] == ["c"]
         assert "_resume_skip" not in result
+
+
+class TestHandlerComposability:
+    """Tests for handler protocol composability across decorators, ralph, and run_workflow."""
+
+    def test_decorated_handler_usable_in_run_workflow(self, app, runner_factory):
+        """@app.handler decorated function passed as a step to run_workflow executes correctly."""
+
+        @app.handler
+        def increment(runner, state: State) -> State:
+            return {**state, "n": state["n"] + 1}
+
+        @app.handler
+        def use_increment(runner, state: State) -> State:
+            return run_workflow(runner, state, [increment])
+
+        runner, _ = runner_factory(app, "use_increment", {"n": 0})
+        result = runner.run()
+        assert result["n"] == 1
+
+    def test_mixed_handler_sources_in_run_workflow(self, app, runner_factory):
+        """A steps list containing a plain function and a decorated handler all execute in sequence."""
+
+        def plain_step(runner, state: State) -> State:
+            return {**state, "steps": state.get("steps", []) + ["plain"]}
+
+        @app.handler
+        def decorated_step(runner, state: State) -> State:
+            return {**state, "steps": state.get("steps", []) + ["decorated"]}
+
+        @app.handler
+        def orchestrator(runner, state: State) -> State:
+            return run_workflow(runner, state, [plain_step, decorated_step])
+
+        runner, _ = runner_factory(app, "orchestrator", {})
+        result = runner.run()
+        assert result["steps"] == ["plain", "decorated"]
+
+    def test_decorated_handler_composable_with_ralph(self, app, runner_factory):
+        """ralph(decorated_fn, validator=v) works and the resulting handler runs in run_workflow."""
+        from antkeeper.handlers.ralph import ralph, ValidationResult
+
+        @app.handler
+        def do_work(runner, state: State) -> State:
+            return {**state, "done": True}
+
+        def always_pass(state: State) -> ValidationResult:
+            return ValidationResult(success=True, feedback="")
+
+        wrapped = ralph(do_work, validator=always_pass)
+
+        @app.handler
+        def orchestrator(runner, state: State) -> State:
+            return run_workflow(runner, state, [wrapped])
+
+        runner, _ = runner_factory(app, "orchestrator", {})
+        result = runner.run()
+        assert result["done"] is True
+
+    def test_ralph_wrapping_cc_handler_pattern(self, app, runner_factory):
+        """A handler mimicking cc_handler output, wrapped with ralph, runs in run_workflow."""
+        from antkeeper.handlers.ralph import ralph, ValidationResult
+
+        def fake_cc_handler(runner, state: State) -> State:
+            return {**state, "cc_ran": True}
+
+        fake_cc_handler.__name__ = "fake_cc"
+
+        def always_pass(state: State) -> ValidationResult:
+            return ValidationResult(success=True, feedback="")
+
+        wrapped = ralph(fake_cc_handler, validator=always_pass)
+
+        @app.handler
+        def orchestrator(runner, state: State) -> State:
+            return run_workflow(runner, state, [wrapped])
+
+        runner, _ = runner_factory(app, "orchestrator", {})
+        result = runner.run()
+        assert result["cc_ran"] is True
+
+    def test_lambda_handler_in_run_workflow(self, app, runner_factory):
+        """A lambda assigned to a variable still works in run_workflow (has __name__ == '<lambda>')."""
+        def step(runner, state):
+            return {**state, "lambda_ran": True}
+        step.__name__ = "<lambda>"
+
+        @app.handler
+        def orchestrator(runner, state: State) -> State:
+            return run_workflow(runner, state, [step])
+
+        runner, _ = runner_factory(app, "orchestrator", {})
+        result = runner.run()
+        assert result["lambda_ran"] is True
+
+    def test_handler_with_kwargs_in_run_workflow(self, app, runner_factory):
+        """A handler defined with **kwargs satisfies the protocol and works in run_workflow."""
+
+        def flexible_handler(runner, state, **kwargs):
+            return {**state, "flex": True}
+
+        flexible_handler.__name__ = "flexible"
+
+        @app.handler
+        def orchestrator(runner, state: State) -> State:
+            return run_workflow(runner, state, [flexible_handler])
+
+        runner, _ = runner_factory(app, "orchestrator", {})
+        result = runner.run()
+        assert result["flex"] is True
