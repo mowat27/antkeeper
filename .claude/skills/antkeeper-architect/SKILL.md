@@ -1,11 +1,9 @@
 ---
 name: antkeeper-architect
-description: >-
-  Antkeeper architect for Python agentic workflow applications. Three modes:
-  install antkeeper into a project, contribute antkeeper-specific design to a
-  feature spec, or answer questions about antkeeper usage, handlers, factories,
-  and workflow composition. Use when the user mentions antkeeper, handlers,
-  cc_handler, workflows, run_workflow, or needs to set up an agentic pipeline.
+description: Patterns for the Antkeeper Python agentic framework: handlers, cc_handler factory, ralph validators, run_workflow, channels. Use when editing handlers.py, importing from antkeeper.*, or when the user mentions antkeeper, cc_handler, or ralph.
+paths:
+  - "**/handlers.py"
+  - "**/*-handlers.py"
 ---
 
 # Antkeeper Architect
