@@ -185,8 +185,8 @@ ralph(
     *,
     validator: Callable[[State], ValidationResult] | str,
     max_retries: int = 3,
-    prompt_key: str = "prompt",
     label: str | None = None,
+    learnings_file: str | None = None,
 ) -> Handler
 ```
 
@@ -194,30 +194,26 @@ ralph(
 - `handler` — the handler to wrap
 - `validator` — either a Python callable `(State) -> ValidationResult` or a path to a bash script (stdin/stdout JSON contract; see below)
 - `max_retries` — number of retries after the initial attempt; default 3 means 4 total attempts
-- `prompt_key` — state key holding the prompt to augment on retries; default `"prompt"`
 - `label` — name for the wrapper; defaults to `handler.__name__`. Also used as the log filename component
+- `learnings_file` — optional path template for a shared markdown learnings file. Supports `$var` interpolation against result state. When set, each failed validation attempt appends a labelled heading and feedback to the resolved file path
 
 **Retry loop:**
 
-On each attempt `ralph` calls `runner.report_progress(f"ralph {label}: attempt N/M")`, invokes the handler, then calls the validator. If validation passes, the original prompt is restored and the state is returned. If it fails, the feedback is appended to the progress log and the prompt is augmented with prior-attempts context before the next attempt. After all attempts are exhausted, `runner.fail()` raises `WorkflowFailedError`.
+On each attempt `ralph` calls `runner.report_progress(f"ralph {label}: attempt N/M")`, invokes the handler, then calls the validator. If validation passes, the result state is returned directly. If it fails, the feedback is appended to the progress log and, if `learnings_file` is set, also to the learnings file. After all attempts are exhausted, `runner.fail()` raises `WorkflowFailedError`.
 
-**Original prompt restoration:** When validation passes, the value of `state[prompt_key]` from before the retry loop is restored in the returned state, undoing any augmentation added during retries.
+**Progress log:** A separate plain-text append-only file at `{log_dir}/ralph-{label}-{runner.id}.log`. Each entry records the attempt number, a state diff (keys added/changed/removed, values truncated at 200 chars), and the validation result with feedback. It is distinct from the runner's own log file.
 
-**Prompt augmentation on retries:**
+**Learnings file:** When `learnings_file` is set, each failed attempt appends a markdown section to the resolved path:
 
-```
-Previous attempts have not passed validation. Here is the history:
+```markdown
+## {label} — Attempt N/M
 
-<prior_attempts>
-{progress_log_content}
-</prior_attempts>
+{validation.feedback}
 
-Please address the feedback and try again.
-
-{original_prompt}
+---
 ```
 
-**Progress log:** A separate plain-text append-only file at `{log_dir}/ralph-{label}-{runner.id}.log`. Each entry records the attempt number, a state diff (keys added/changed/removed, values truncated at 200 chars), and the validation result with feedback. This file is read back to build the augmented prompt on retries; it is distinct from the runner's own log file.
+The path template is resolved using `$var` substitution against the result state (same pattern as `cc_handler` command interpolation). Missing state keys raise `KeyError` immediately. Intermediate directories are created automatically. Multiple nested `ralph` loops can target the same file, accumulating context under distinct labelled headings.
 
 **Exception propagation:** Handler and validator exceptions propagate immediately without retry.
 

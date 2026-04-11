@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
@@ -84,6 +85,14 @@ def _state_diff(before: State, after: State) -> str:
     changed = {k for k in before_keys & after_keys if before[k] != after[k]}
 
     def _fmt(v: object) -> str:
+        """Return a truncated repr of ``v``, capped at ``_MAX_VALUE_LEN`` characters.
+
+        Args:
+            v: Any value to format.
+
+        Returns:
+            Repr string, truncated with trailing ``...`` if it exceeds the limit.
+        """
         s = repr(v)
         if len(s) > _MAX_VALUE_LEN:
             s = s[:_MAX_VALUE_LEN] + "..."
@@ -104,15 +113,15 @@ def ralph(
     *,
     validator: _Validator | str,
     max_retries: int = 3,
-    prompt_key: str = "prompt",
     label: str | None = None,
+    learnings_file: str | None = None,
 ) -> Handler:
     """Wrap a handler with a retry-validation loop.
 
     On each attempt the inner handler is called, then the validator is invoked.
-    If validation fails, feedback is appended to a progress log and the prompt
-    is augmented with prior-attempts context before the next attempt. On
-    exhaustion, ``runner.fail()`` is called which raises ``WorkflowFailedError``.
+    If validation fails, feedback is appended to a progress log and optionally
+    to a shared learnings file on disk. On exhaustion, ``runner.fail()`` is
+    called which raises ``WorkflowFailedError``.
 
     Args:
         handler: The handler to wrap. Must be ``(Runner, State) -> State``.
@@ -120,8 +129,11 @@ def ralph(
             to a bash script that implements the stdin/stdout JSON contract.
         max_retries: Number of retries after the initial attempt (default 3,
             meaning 4 total attempts).
-        prompt_key: State key holding the prompt to augment on retries.
         label: Name for the wrapper; defaults to ``handler.__name__``.
+        learnings_file: Optional path template for a shared markdown learnings
+            file. Supports ``$var`` interpolation against result state. When
+            set, validation feedback is appended under a labelled heading on
+            each failed attempt.
 
     Returns:
         A handler callable with ``__name__`` set to the resolved label.
@@ -137,10 +149,9 @@ def ralph(
         """Execute the wrapped handler with retry-validation logic.
 
         Runs up to ``max_retries + 1`` attempts. On each failure the validator
-        feedback is appended to a per-run log file and the prompt is augmented
-        with the failure history before the next attempt. On success the
-        original prompt value is restored in the returned state. On exhaustion
-        ``runner.fail()`` is called, raising ``WorkflowFailedError``.
+        feedback is appended to a per-run log file and optionally to a shared
+        learnings file. On exhaustion ``runner.fail()`` is called, raising
+        ``WorkflowFailedError``.
 
         Args:
             runner: The active workflow runner used for progress reporting and
@@ -148,32 +159,17 @@ def ralph(
             state: Current workflow state passed to the inner handler.
 
         Returns:
-            Updated state from the first passing attempt, with the original
-            prompt value restored under ``prompt_key``.
+            Updated state from the first passing attempt.
         """
         log_dir = runner.app.log_dir(runner) if callable(runner.app.log_dir) else runner.app.log_dir
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f"ralph-{resolved_label}-{runner.id}.log")
 
-        original_prompt: object = state.get(prompt_key)
         current_state: State = state
         total_attempts = max_retries + 1
 
         for attempt in range(total_attempts):
             runner.report_progress(f"ralph {resolved_label}: attempt {attempt + 1}/{total_attempts}")
-
-            if attempt > 0:
-                with open(log_path) as f:
-                    prior_log = f.read()
-                augmented_prompt = (
-                    "Previous attempts have not passed validation. Here is the history:\n\n"
-                    "<prior_attempts>\n"
-                    f"{prior_log}\n"
-                    "</prior_attempts>\n\n"
-                    "Please address the feedback and try again.\n\n"
-                    f"{original_prompt}"
-                )
-                current_state = {**current_state, prompt_key: augmented_prompt}
 
             state_before = current_state
             result_state = handler(runner, current_state)
@@ -188,10 +184,24 @@ def ralph(
 
             if validation.success:
                 _append_log(log_path, log_entry + "Validation: PASSED\n---\n")
-                return {**result_state, prompt_key: original_prompt}
+                return result_state
             else:
                 log_entry += f"Validation: FAILED\nFeedback: {validation.feedback}\n---\n"
                 _append_log(log_path, log_entry)
+                if learnings_file is not None:
+                    resolved_path = re.sub(
+                        r'\$([a-zA-Z_]\w*)',
+                        lambda m: str(result_state[m.group(1)]),
+                        learnings_file,
+                    )
+                    dirname = os.path.dirname(resolved_path)
+                    if dirname:
+                        os.makedirs(dirname, exist_ok=True)
+                    entry = (
+                        f"## {resolved_label} \u2014 Attempt {attempt + 1}/{total_attempts}\n\n"
+                        f"{validation.feedback}\n\n---\n"
+                    )
+                    _append_log(resolved_path, entry)
                 current_state = result_state
 
         runner.fail(f"ralph {resolved_label}: validation failed after {total_attempts} attempts")

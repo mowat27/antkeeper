@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-04-10 (branch: refactor-unify-handler-protocol)
+# Last validated: 2026-04-11 (branch: feat/ralph-learnings-file)
 
 overview:
   name: antkeeper
@@ -605,18 +605,19 @@ handler_factories:
           *,
           validator: _Validator | str,
           max_retries: int = 3,
-          prompt_key: str = "prompt",
           label: str | None = None,
+          learnings_file: str | None = None,
       ) -> Handler
     returns: Handler callable with __name__ set to resolved label
     responsibility: >
       Factory that wraps any handler with a retry-validation loop. On each attempt the
       inner handler is called, then the validator is invoked. On validation failure,
-      feedback is appended to a progress log and the prompt is augmented with prior-attempts
-      context before the next attempt. On exhaustion, runner.fail() raises WorkflowFailedError.
-      Has zero LLM dependencies — wraps any callable matching (Runner, State) -> State with __name__.
+      feedback is appended to a per-run progress log and optionally to a shared markdown
+      learnings file. On exhaustion, runner.fail() raises WorkflowFailedError.
+      Has zero LLM dependencies - wraps any callable matching (Runner, State) -> State with __name__.
       Uses antkeeper.core.domain.Handler for parameter and return type (the local _NamedHandler
-      protocol has been removed).
+      protocol has been removed). prompt_key and prompt augmentation were removed - the wrapper
+      no longer mutates state between retries.
     types:
       ValidationResult:
         kind: frozen dataclass
@@ -631,7 +632,11 @@ handler_factories:
       (bash script: state JSON on stdin, {"success": bool, "feedback": str} on stdout).
       max_retries+1 total attempts (default 4). Progress log: {log_dir}/ralph-{label}-{runner.id}.log
       (plain text, append-only, --- delimited; each entry has attempt#, state diff, PASSED/FAILED).
-      On retry: reads log, prepends prior-attempts context to prompt. On success: restores original prompt.
+      On retry: state passed unchanged to inner handler (no prompt augmentation).
+      On success: returns result_state directly (no prompt restoration).
+      learnings_file: optional path template with $var interpolation from result state;
+      on each failure, appends a markdown heading "## {label} - Attempt N/total" plus
+      feedback to the resolved path; parent dirs created as needed.
       On exhaustion: runner.fail(). Handler/validator exceptions propagate immediately (no retry).
 
 channel_implementations:
