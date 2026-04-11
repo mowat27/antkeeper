@@ -8,7 +8,7 @@ App
     ``@app.handler``, then pass the instance to a ``Runner`` for execution.
 run_workflow
     Helper function for executing an ordered chain of handler steps with
-    automatic progress tracking and resume support.
+    state threading and per-step persistence.
 
 Internal helpers
 ----------------
@@ -174,32 +174,13 @@ class App:
             raise ValueError(f"Unknown handler: {name}")
 
 
-def run_workflow(runner: Runner, state: State, steps: list[Handler], skip: int = 0) -> State:
+def run_workflow(runner: Runner, state: State, steps: list[Handler]) -> State:
     """Execute a sequence of workflow steps with state threading.
 
     Each step receives the runner and the current state, processes it, and
     returns an updated state that is forwarded to the next step (the
-    "state-threading" pattern).  All step transitions are logged.
-
-    Progress tracking
-    -----------------
-    Before the first step runs, a ``"_progress"`` key is inserted into state::
-
-        {"total": <number of steps>, "completed": 0}
-
-    The updated state — including ``_progress`` — is immediately persisted via
-    ``runner._persist_state``.  This means external observers (e.g. a polling
-    API endpoint) can read the progress counter from the state file even before
-    the first step has returned.  After each step completes, ``completed`` is
-    incremented by 1 and the state is persisted again.
-
-    Resume support
-    --------------
-    When ``skip > 0``, the first *skip* steps are not executed and
-    ``_progress["completed"]`` starts at *skip*.  If ``skip`` is 0 and the
-    state contains ``_resume_skip``, that value is used instead.  The
-    ``_resume_skip`` key is always stripped from state before execution so it
-    is never persisted or visible to handlers.
+    "state-threading" pattern).  All step transitions are logged.  State is
+    persisted after each step completes.
 
     Args:
         runner: The Runner instance executing the workflow.  Used for logging
@@ -207,28 +188,13 @@ def run_workflow(runner: Runner, state: State, steps: list[Handler], skip: int =
         state: The current state dictionary passed into the step sequence.
         steps: Ordered list of callables each accepting ``(runner, state)``
             and returning the updated ``State``.
-        skip: Number of leading steps to skip (default 0).  When resuming a
-            workflow, set this to the number of already-completed steps.
 
     Returns:
         The final state after all steps have been executed.
     """
-    # Consume _resume_skip from state (one-shot signal from CLI resume).
-    resume_skip = state.get("_resume_skip", 0)
-    state = {k: v for k, v in state.items() if k != "_resume_skip"}
-
-    if skip == 0 and resume_skip > 0:
-        skip = resume_skip
-
-    runner.logger.info(f"run_workflow started with {len(steps)} steps: {[s.__name__ for s in steps]}")
-    if skip > 0:
-        runner.logger.info(f"Resuming: skipping {skip} completed steps")
-    # Initialise progress and persist immediately so the state file reflects
-    # the total step count before any step begins executing.
-    state = {**state, "_progress": {"total": len(steps), "completed": skip}}
-    runner._persist_state(state)
     tracer = trace.get_tracer("antkeeper")
-    for i, step in enumerate(steps[skip:], start=skip):
+    runner.logger.info(f"run_workflow started with {len(steps)} steps: {[s.__name__ for s in steps]}")
+    for i, step in enumerate(steps):
         step_name = step.__name__
         runner.logger.info(f"Executing step: {step_name}")
         with tracer.start_as_current_span(
@@ -242,8 +208,6 @@ def run_workflow(runner: Runner, state: State, steps: list[Handler], skip: int =
             },
         ):
             state = step(runner, state)
-        progress = {**state["_progress"], "completed": state["_progress"]["completed"] + 1}
-        state = {**state, "_progress": progress}
         runner._persist_state(state)
         runner.logger.debug(f"Step completed: {step_name}, state keys: {list(state.keys())}")
     runner.logger.info("run_workflow completed")

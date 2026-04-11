@@ -5,8 +5,6 @@ workflows. It handles argument parsing, app loading, initial state
 configuration, and runner setup.
 """
 
-import glob as globmod
-import json
 import logging
 import os
 import sys
@@ -100,7 +98,19 @@ def parse_state_pairs(pairs: list[str]) -> dict[str, str]:
 
 
 def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict, *, verbose: bool = False) -> None:
-    """Execute a workflow via CLI channel."""
+    """Execute a named workflow via the CLI channel.
+
+    Loads the App from ``agents_file``, constructs a ``CliChannel`` and a
+    ``Runner``, then runs the workflow.  Progress and result output are printed
+    to stdout; errors are printed to stderr and the process exits with status 1.
+
+    Args:
+        agents_file: Path to the Python file that defines the ``app`` object.
+        workflow_name: Name of the handler to execute (must be registered in the app).
+        state: Initial state dictionary passed to the workflow.
+        verbose: When ``True``, all events are emitted as JSON rather than only
+            progress and error events.
+    """
     try:
         app = load_app(agents_file)
     except FileNotFoundError:
@@ -125,34 +135,15 @@ def _run_workflow_cli(agents_file: str, workflow_name: str, state: dict, *, verb
     print(result)
 
 
-def _load_state_by_run_id(state_dir: str, run_id: str) -> tuple[dict, str]:
-    """Load persisted state for a previous run by its run_id.
-
-    Searches state_dir for a JSON file whose name ends with ``-{run_id}.json``.
-
-    Args:
-        state_dir: Directory containing persisted state files.
-        run_id: The 8-char hex identifier from a previous run.
-
-    Returns:
-        Tuple of (state dict, file path).
-
-    Raises:
-        FileNotFoundError: If no matching state file is found.
-    """
-    matches = globmod.glob(os.path.join(state_dir, f"*-{run_id}.json"))
-    if not matches:
-        raise FileNotFoundError(f"No state file found for run_id: {run_id}")
-    path = matches[0]
-    with open(path) as f:
-        return json.load(f), path
-
 
 @click.group(invoke_without_command=True)
 @click.version_option(package_name="antkeeper")
 @click.pass_context
 def cli(ctx):
-    """Antkeeper workflow framework CLI."""
+    """Entry point for the Antkeeper command-line interface.
+
+    Displays help when invoked with no sub-command.
+    """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -165,7 +156,12 @@ def cli(ctx):
 @click.argument("workflow_name")
 @click.argument("prompt_files", nargs=-1, required=False)
 def run(agents_file, initial_state, model, verbose, workflow_name, prompt_files):
-    """Execute a workflow."""
+    """Execute a named workflow from the command line.
+
+    Parses ``--initial-state`` key=value pairs into a state dictionary,
+    optionally reads prompt content from positional files or stdin, then
+    delegates to ``_run_workflow_cli``.
+    """
     state = parse_state_pairs(list(initial_state))
     if model is not None:
         state["model"] = model
@@ -185,61 +181,16 @@ def run(agents_file, initial_state, model, verbose, workflow_name, prompt_files)
 
 
 @cli.command()
-@click.option("--agents-file", default="handlers.py", help="Path to Python file containing the app.")
-@click.option("--verbose", is_flag=True, default=False, help="Show all events as JSON instead of only progress/error.")
-@click.argument("run_id")
-def resume(agents_file, verbose, run_id):
-    """Resume a previously interrupted workflow run."""
-    try:
-        app = load_app(agents_file)
-    except FileNotFoundError:
-        logger.error(f"Agents file not found: {agents_file}")
-        click.echo(f"Error: agents file not found: {agents_file}", err=True)
-        sys.exit(1)
-    except AttributeError:
-        logger.error(f"{agents_file} has no 'app' attribute")
-        click.echo(f"Error: {agents_file} has no 'app' attribute", err=True)
-        sys.exit(1)
-
-    try:
-        state, state_path = _load_state_by_run_id(app.state_dir, run_id)
-    except FileNotFoundError:
-        click.echo(f"Error: no state found for run_id: {run_id}", err=True)
-        sys.exit(1)
-
-    if "workflow_name" not in state:
-        click.echo("Error: cannot resume: state file has no workflow_name", err=True)
-        sys.exit(1)
-
-    if "_progress" not in state:
-        click.echo("Error: cannot resume: workflow has no progress to resume from", err=True)
-        sys.exit(1)
-
-    completed = state["_progress"]["completed"]
-    total = state["_progress"]["total"]
-    if completed >= total:
-        click.echo(f"Error: cannot resume: workflow already completed ({completed}/{total} steps)", err=True)
-        sys.exit(1)
-
-    state["_resume_skip"] = completed
-    channel = CliChannel(workflow_name=state["workflow_name"], initial_state=state, verbose=verbose)
-    runner = Runner(app, channel)
-    logger.info(f"Resuming run_id={run_id} as new run_id={runner.id}")
-    try:
-        result = runner.run()
-    except WorkflowFailedError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    print(result)
-
-
-@cli.command()
 @click.option("--host", default="127.0.0.1", help="Host address to bind.")
 @click.option("--port", default=8000, type=int, help="Port number to bind.")
 @click.option("--reload", is_flag=True, help="Enable auto-reload on code changes.")
 @click.option("--agents-file", default="handlers.py", help="Path to Python file containing the app.")
 def server(host, port, reload, agents_file):
-    """Start the FastAPI server."""
+    """Start the Antkeeper FastAPI/uvicorn server.
+
+    Sets the ``ANTKEEPER_HANDLERS_FILE`` environment variable so the server
+    process knows which handlers file to load, then starts uvicorn.
+    """
     import uvicorn
 
     os.environ["ANTKEEPER_HANDLERS_FILE"] = agents_file
@@ -249,7 +200,13 @@ def server(host, port, reload, agents_file):
 @cli.command()
 @click.argument("path", default=".")
 def init(path):
-    """Scaffold a new Antkeeper project."""
+    """Scaffold a new Antkeeper project at the given directory path.
+
+    Writes a ``handlers.py`` starter file from ``HANDLERS_TEMPLATE`` into
+    ``path`` (defaults to the current directory).  Exits with an error if the
+    file already exists, the directory does not exist, or write permission is
+    denied.
+    """
     path = os.path.realpath(path)
     target = os.path.join(path, "handlers.py")
     if os.path.exists(target):

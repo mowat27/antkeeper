@@ -1,6 +1,6 @@
 # Antkeeper Framework - Design Expertise
 # Mental model for the antkeeper workflow engine
-# Last validated: 2026-04-11 (branch: feat/ralph-learnings-file)
+# Last validated: 2026-04-11 (branch: refactor-retire-resume)
 
 overview:
   name: antkeeper
@@ -209,12 +209,10 @@ architecture:
 
   state_persistence: >
     Automatic JSON-based state snapshots. Runner writes state to
-    <app.state_dir>/<timestamp>-<id>.json at four points: (1) before workflow —
-    initial state with run_id/workflow_name, (2) run_workflow: _progress inserted
-    (completed=skip) before first step, (3) after each step — _progress.completed
-    incremented, (4) after completion — final state. Log and state files share the
-    same <timestamp>-<id> base name. JSON indent=2. Single direct handlers produce
-    no _progress key.
+    <app.state_dir>/<timestamp>-<id>.json at three points: (1) before workflow —
+    initial state with run_id/workflow_name, (2) after each step via run_workflow,
+    (3) after completion — final state. Log and state files share the
+    same <timestamp>-<id> base name. JSON indent=2.
 
 domain_types:
   WorkflowFailedError:
@@ -230,8 +228,7 @@ domain_types:
     notes: >
       Type alias. All workflow state is a flat string-keyed dict. Handlers
       receive and return State; Runner injects run_id and workflow_name.
-      Reserved keys: run_id, workflow_name, _progress (by run_workflow),
-      _resume_skip (one-shot resume signal; stripped before execution, never persisted).
+      Reserved keys: run_id, workflow_name.
 
   StreamEvent:
     file: src/antkeeper/core/domain.py
@@ -348,33 +345,21 @@ core_objects:
       and state dir, sets up FileHandler (<log_dir>/<ts>-<id>.log), state file at
       <state_dir>/<ts>-<id>.json. Logger propagate=False. run() resolves callable
       env values before _app_env; persists initial state before workflow; run_workflow
-      persists _progress before first step and after each step; run() persists once
-      more after completion. fail() raises WorkflowFailedError (not exit(1)).
+      persists after each step; run() persists once more after completion.
+      fail() raises WorkflowFailedError (not exit(1)).
 
   run_workflow:
     file: src/antkeeper/core/app.py
-    signature: "run_workflow(runner: Runner, state: State, steps: list[Handler], skip: int = 0) -> State"
+    signature: "run_workflow(runner: Runner, state: State, steps: list[Handler]) -> State"
     responsibility: >
       Sequential composition helper. Folds state through a list of Handler callables.
       Logs step names and completion via runner.logger. Uses step.__name__ directly
       (no getattr fallback) — Handler protocol guarantees __name__ is always present.
-    progress_tracking: >
-      Before the first step, inserts _progress: {"total": len(steps), "completed": skip}
-      into state and immediately calls runner._persist_state(). External observers can
-      read total step count immediately. After each step, increments _progress.completed
-      by 1 and persists. The _progress key is part of the returned state. Single direct
-      handler invocations (not using run_workflow) produce no _progress key.
-    resume_support: >
-      When skip > 0, first skip steps are not executed and _progress["completed"] starts
-      at skip. If skip == 0 and state contains _resume_skip, that value is used instead.
-      _resume_skip is always stripped from state before execution (never persisted or
-      visible to handlers). This is a one-shot signal set by the CLI resume command.
+      State is persisted after each step via runner._persist_state().
     persistence_order:
-      - "1. Strip _resume_skip, resolve effective skip"
-      - "2. Insert _progress (completed=skip) + persist (before first step)"
-      - "3. Execute step (only steps[skip:])"
-      - "4. Increment _progress.completed + persist (after each step)"
-      - "5. Return final state (Runner.run() persists once more)"
+      - "1. Execute each step in order"
+      - "2. Persist state after each step"
+      - "3. Return final state (Runner.run() persists once more)"
 
 git_objects:
   GitCommandError:
@@ -688,7 +673,6 @@ cli_entry_point:
   shared_functions:
     - "parse_state_pairs(pairs: list[str]) -> dict[str, str]  # splits key=val strings"
     - "_run_workflow_cli(agents_file, workflow_name, state) -> None  # calls load_app(), creates CliChannel+Runner, runs, handles errors"
-    - "_load_state_by_run_id(state_dir: str, run_id: str) -> tuple[dict, str]  # globs state_dir for *-{run_id}.json, returns (state, path); raises FileNotFoundError if none"
   note: "load_app moved to src/antkeeper/loader.py; fetch_gh_issue and build_issues_prompt moved to src/antkeeper/helpers/github.py"
   subcommands:
     run:
@@ -709,19 +693,6 @@ cli_entry_point:
         - "FileNotFoundError -> prompt file not found (positional arg)"
         - "Invalid state pair (no '=') -> stderr + exit(1)"
         - "WorkflowFailedError -> stderr + exit(1)"
-
-    resume:
-      framework: Click (@cli.command)
-      args:
-        - "--agents-file (default: handlers.py)"
-        - "run_id (positional) — 8-char hex from the interrupted run"
-      flow: >
-        load_app -> _load_state_by_run_id -> validate workflow_name, _progress, completed<total
-        -> state["_resume_skip"]=completed -> CliChannel+Runner -> run_workflow consumes _resume_skip
-      error_handling:
-        - "Agents file not found / no app / state file not found / no workflow_name / no _progress / already completed -> stderr + exit(1)"
-        - "WorkflowFailedError -> stderr + exit(1)"
-      design_note: "Resume always creates a new Runner. _resume_skip flows via initial_state into run_workflow."
 
     server:
       framework: Click (@cli.command)
@@ -890,7 +861,6 @@ testing_design:
     - tests/core/test_workflows.py — engine paths, env var lifecycle, _progress tracking, callable log_dir
     - tests/core/test_logging.py — per-run file logging, App config defaults
     - tests/core/test_state_persistence.py — state file creation, naming, per-step persistence
-    - tests/core/test_resume.py — _load_state_by_run_id: finds file, raises on missing
     - tests/core/test_loader.py — load_app: happy path, FileNotFoundError, AttributeError
     - tests/channels/test_cli_channel.py — CliChannel initial_state, attributes
     - tests/channels/test_api_channel.py — ApiChannel type, stdout/stderr routing

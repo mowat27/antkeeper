@@ -41,12 +41,6 @@ directly):
 
 - ``"run_id"``: unique 8-character hex identifier for the current execution.
 - ``"workflow_name"``: name of the workflow being executed.
-- ``"_progress"``: ``{"total": int, "completed": int}`` inserted by
-  ``run_workflow`` before the first step executes and updated after each
-  subsequent step.
-- ``"_resume_skip"``: ``int`` — one-shot signal consumed by ``run_workflow``
-  to skip already-completed steps when resuming.  Set by the CLI ``resume``
-  command; stripped from state before execution and never persisted.
 """
 
 

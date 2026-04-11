@@ -16,8 +16,8 @@ Runner
     Executes a registered workflow for a given channel, wiring together
     logging, state persistence, and progress reporting.
 run_workflow
-    Helper for running an ordered sequence of handler steps with automatic
-    progress tracking and resume support.
+    Helper for running an ordered sequence of handler steps with state
+    threading and per-step persistence.
 State
     Type alias for workflow data (``dict[str, Any]``).
 Channel
