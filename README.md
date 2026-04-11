@@ -12,13 +12,13 @@ Once you're running similar workflows across multiple projects, the duplication 
 
 As you build with AI agents, you accumulate scripts that chain LLM calls into workflows. A typical one might take a prompt, generate a spec, create a branch, implement a feature, then document the changes. These scripts tend to:
 
-- **Lose state** — a failure mid-workflow means starting from scratch. No recovery, no way to run unattended.
+- **Lose state** — a failure mid-workflow means starting from scratch. No way to run unattended.
 - **Duplicate wiring** — every script re-implements argument parsing, error handling, progress reporting, and LLM integration. Across repos, this compounds.
 - **Lock to one surface** — a CLI script cannot easily become a Slack bot or an API endpoint, but you need the same workflow from all three.
 - **Bind to one agent** — the workflow is hardwired to one LLM tool. Switching from Claude Code to Codex or a local model means rewriting.
 - **Hide what happened** — no logging, no observability, no progress tracking. When something fails at 2am, there is no trail.
 
-Antkeeper solves all five. State is persisted after every step. Handlers are reducers with no I/O coupling. Channels decouple trigger surfaces. The LLM layer is a protocol. And every workflow run produces file-based logs and optional OpenTelemetry traces.
+Antkeeper solves these problems. State is persisted after every step. Handlers are reducers with no I/O coupling. Channels decouple trigger surfaces. The LLM layer is a protocol. And every workflow run produces file-based logs and optional OpenTelemetry traces.
 
 ## How It Works
 
@@ -65,7 +65,7 @@ The same workflow runs from an HTTP webhook or a CI job. With a Slack app config
 
 ### Core Concepts
 
-**State** is a plain Python dictionary (`dict[str, Any]`). Each handler receives the current state, does its work, and returns a new dict. State is persisted as JSON after every step. A failure mid-workflow preserves the output of all completed steps, and `antkeeper resume <run_id>` can restart from where it left off.
+**State** is a plain Python dictionary (`dict[str, Any]`). Each handler receives the current state, does its work, and returns a new dict. State is persisted as JSON after every step. A failure mid-workflow preserves the output of all completed steps.
 
 **Handlers** are workflow steps. They follow the reducer pattern: `(Runner, State) -> State`. Pure functions — state in, new state out, no mutation. Register with `@app.handler` to make them callable by name from any channel. For the common case of running an LLM command and extracting fields from the response, the `cc_handler` factory builds handlers declaratively.
 
@@ -132,9 +132,6 @@ antkeeper server --host 0.0.0.0 --port 8000
 # Run with verbose output (all events as JSON instead of only progress/error)
 antkeeper run --model sonnet --verbose sdlc prompts/add-auth.md
 
-# Resume a partially-completed workflow (run_id shown in the original run output)
-antkeeper resume a1b2c3d4
-
 # Trigger via HTTP
 curl -X POST http://localhost:8000/webhook \
   -H "Content-Type: application/json" \
@@ -183,7 +180,7 @@ print(result)  # final state dict
 ## Further Reading
 
 - **[Reference Guide](app_docs/reference.md)** — Handlers, channels, LLM integration, git utilities, state persistence, logging, CLI commands
-- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence, workflow resume, OpenTelemetry tracing, Axiom querying
+- **[Instrumentation](app_docs/instrumentation.md)** — Progress reporting, error handling, logging patterns, state persistence, OpenTelemetry tracing, Axiom querying
 - **[HTTP Server](app_docs/http_server.md)** — Server architecture and endpoint design
 - **[Slack Integration](app_docs/slack.md)** — Bot configuration, event handling, thread-based replies
 - **[Testing Policy](app_docs/testing_policy.md)** — Test structure, fixtures, patterns

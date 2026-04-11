@@ -75,7 +75,7 @@ Tests mirror source layout:
 tests/
 ├── core/              # Tests for src/antkeeper/core/
 │   ├── test_loader.py # load_app() unit tests
-│   └── test_resume.py # _load_state_by_run_id state loading tests
+│   └── test_workflows.py # Workflow execution, env, persistence, composability tests
 ├── channels/          # Tests for src/antkeeper/channels/
 │   ├── test_slack_channel.py  # SlackChannel unit tests
 │   └── test_programmatic.py   # ProgrammaticChannel and _InnerChannel unit tests
@@ -119,8 +119,6 @@ def test_run_invokes_workflow(tmp_path):
 - `TestParseStatePairs` — unit tests for the `parse_state_pairs()` helper (no Runner or CLI invocation)
 - `TestRunCommand` — CliRunner tests for the `run` subcommand
 - `TestInitCommand` — CliRunner tests for the `init` subcommand
-- `TestResumeCommand` — CliRunner tests for the `resume` subcommand
-
 **Key patterns:**
 - Use `CliRunner(mix_stderr=False)` when asserting on stderr separately from stdout
 - Use `runner.invoke(cli, args, input="text")` to simulate piped stdin
@@ -316,27 +314,6 @@ Tests cover:
 - `test_run_workflow_steps_see_env_vars` — Steps inside `run_workflow()` can access env vars set at `Runner.run()` level
 - `test_env_restored_after_run_workflow_step_failure` — Env vars are cleaned up even when a step inside `run_workflow()` raises
 
-### Resume Testing Patterns
-
-Tests for workflow resume cover three distinct concerns, each in its own class or file.
-
-**`tests/core/test_resume.py`** — dedicated file for `_load_state_by_run_id` behaviour:
-
-- `TestLoadStateByRunId` — unit tests for the state-file lookup helper using `tempfile.TemporaryDirectory`. Tests cover: finding a matching file and returning its parsed dict and path, raising `FileNotFoundError` for an empty directory, and selecting the correct file when multiple state files are present.
-
-**`tests/core/test_workflows.py`** — `TestWorkflowSkip` class, alongside other workflow tests:
-
-- Tests for `run_workflow(runner, state, steps, skip=N)` cover: skipping the first N steps, running all steps when `skip=0`, verifying `_progress["completed"]` starts at the skip value, consuming `_resume_skip` from state automatically (when `skip=0`), confirming `_resume_skip` is stripped and not present in the final state, verifying sequential calls are unaffected after `_resume_skip` is consumed on the first call, and confirming an explicit `skip` parameter takes precedence over `_resume_skip` in state.
-
-**`tests/test_cli.py`** — `TestResumeCommand` class using `CliRunner`:
-- Successful resume loads state, skips completed steps, and executes remaining steps
-- Unknown `run_id` → `exit_code == 1`, stderr contains error message
-- Already-completed workflow → `exit_code == 1`, stderr mentions "already completed"
-- State with no `_progress` → `exit_code == 1`, stderr contains error message
-- State with no `workflow_name` → `exit_code == 1`, stderr contains error message
-
-Resume tests use `CliRunner(mix_stderr=False)` and `runner.invoke(cli, ["resume", run_id], ...)` with temp agents files and temp state files.
-
 ### State Persistence Testing Patterns
 
 Tests for state persistence (`tests/core/test_state_persistence.py`) verify:
@@ -346,13 +323,11 @@ Tests for state persistence (`tests/core/test_state_persistence.py`) verify:
 - State persisted after each `run_workflow()` step
 - Handlers can read persisted state mid-workflow to verify persistence timing
 
-`TestWorkflowProgress` in `tests/core/test_workflows.py` covers `_progress` tracking behaviour:
+`TestStatePersistence` in `tests/core/test_workflows.py` covers per-step persistence and guards against reintroduction of removed keys:
 
-- **`test_run_workflow_final_state_has_progress`** — returned state has `_progress == {"total": N, "completed": N}` after all steps
-- **`test_run_workflow_progress_increments_per_step`** — a capturing step verifies `_progress["completed"]` increments correctly across steps (values seen are `[0, 1, 2]` for three steps)
-- **`test_run_workflow_single_step_progress`** — single step produces `{"total": 1, "completed": 1}`
-- **`test_initial_progress_persisted_before_first_step`** — reads the state file from disk inside the first step and asserts `_progress == {"total": 1, "completed": 0}`. This is the regression test for the bug where `_progress` was not persisted until after the first step completed. Uses `open(runner._state_path)` + `json.load()` directly to verify what is on disk, not just in memory.
-- **`test_single_handler_run_has_no_progress`** — `Runner.run()` used directly (without `run_workflow`) produces no `_progress` key
+- **`test_state_persisted_after_each_step`** — verifies `_persist_state` is called after each step in a multi-step workflow
+- **`test_final_state_has_no_progress_or_resume_keys`** — asserts `_progress` and `_resume_skip` are absent from returned state
+- **`test_nested_run_workflow`** — verifies nested `run_workflow` calls thread state correctly without key conflicts
 
 ### LLM Agent Testing Patterns
 

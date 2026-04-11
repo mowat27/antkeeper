@@ -4,9 +4,9 @@
 
 freshness:
   last_fetched_channels: 1774978486
-  last_fetched_domain: 1775816572
-  last_fetched_runner: 1774544580
-  last_fetched_cli: 1774978486
+  last_fetched_domain: 1775945949
+  last_fetched_runner: 1775945949
+  last_fetched_cli: 1775945949
   last_fetched_webhook: 1773106200
   last_fetched_slack_events: 1774978486
 
@@ -200,7 +200,7 @@ verbose_mode:
     if not event.content: return
     if not self.verbose and event.type not in ("progress", "error"): return
   configuration:
-    cli: "--verbose flag on 'run' and 'resume' commands"
+    cli: "--verbose flag on 'run' command"
     api: "Not currently configurable - defaults to False"
     slack: "ANTKEEPER_SLACK_VERBOSE env var ('1' or 'true', case-insensitive)"
     programmatic: "N/A - no verbose mode; all non-internal events delivered via callbacks"
@@ -243,15 +243,6 @@ construction_sites:
       initial_state: parsed from --initial-state key=value pairs
       verbose: from --verbose flag (bool)
     called_by: "'run' click command"
-
-  cli_resume_command:
-    file: src/antkeeper/cli.py
-    function: resume (click command)
-    constructs: CliChannel
-    params_passed:
-      workflow_name: from persisted state["workflow_name"]
-      initial_state: loaded from state file (with _resume_skip injected)
-      verbose: from --verbose flag (bool)
 
   webhook_endpoint:
     file: src/antkeeper/http/webhook.py
@@ -337,5 +328,3 @@ state_type:
   reserved_keys:
     - run_id: "8-char hex UUID set by Runner"
     - workflow_name: "set by Runner from channel.workflow_name"
-    - _progress: "{total: int, completed: int} managed by run_workflow"
-    - _resume_skip: "int - consumed by run_workflow for resume, never persisted"

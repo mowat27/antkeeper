@@ -6,16 +6,13 @@ Covers the full surface area of workflow execution in the Antkeeper framework:
 * Error handling — ``WorkflowFailedError`` propagation and unknown handler lookup.
 * App environment — ``env`` lifecycle (set before handler, restored after success
   and failure, callable env values, mixed static/callable maps).
-* Progress tracking — ``_progress`` injection, per-step increment, and initial
-  persistence to disk via ``run_workflow``.
+* State persistence — per-step persistence via ``run_workflow``.
 * Callable ``log_dir`` — resolver receives the Runner, resulting dir is created.
-* Skip / resume — ``skip`` parameter, ``_resume_skip`` state key, precedence rules.
 * Handler composability — plain functions, ``@app.handler`` decorated handlers,
   ``ralph``-wrapped handlers, and handlers with ``**kwargs``, all usable as
   ``run_workflow`` steps.
 """
 
-import json
 import os
 import tempfile
 
@@ -378,86 +375,6 @@ class TestAppEnvironment:
         assert result["val"] == "plain_value"
 
 
-class TestWorkflowProgress:
-    """Tests for ``_progress`` tracking injected by ``run_workflow``."""
-
-    def test_run_workflow_final_state_has_progress(self, app, runner_factory):
-        """Final state contains a ``_progress`` dict with total and completed counts equal."""
-
-        def step_a(runner, state):
-            return {**state, "a": 1}
-
-        def step_b(runner, state):
-            return {**state, "b": 2}
-
-        @app.handler
-        def workflow(runner, state):
-            return run_workflow(runner, state, [step_a, step_b])
-
-        runner, source = runner_factory(app, "workflow", {})
-        result = runner.run()
-        assert result["_progress"] == {"total": 2, "completed": 2}
-
-    def test_run_workflow_progress_increments_per_step(self, app, runner_factory):
-        """``_progress["completed"]`` starts at 0 and increments by 1 after each executed step."""
-        captured = []
-
-        def capturing_step(runner, state):
-            captured.append(state["_progress"]["completed"])
-            return state
-
-        @app.handler
-        def workflow(runner, state):
-            return run_workflow(runner, state, [capturing_step, capturing_step, capturing_step])
-
-        runner, source = runner_factory(app, "workflow", {})
-        runner.run()
-        assert captured == [0, 1, 2]
-
-    def test_run_workflow_single_step_progress(self, app, runner_factory):
-        """A workflow with a single step produces ``_progress`` with total and completed both equal to 1."""
-
-        def step(runner, state):
-            return state
-
-        @app.handler
-        def workflow(runner, state):
-            return run_workflow(runner, state, [step])
-
-        runner, source = runner_factory(app, "workflow", {})
-        result = runner.run()
-        assert result["_progress"] == {"total": 1, "completed": 1}
-
-    def test_initial_progress_persisted_before_first_step(self, app, runner_factory):
-        """``_progress`` with ``completed: 0`` is persisted to disk before the first step executes."""
-        captured_progress = {}
-
-        def step(runner, state):
-            with open(runner._state_path) as f:
-                persisted = json.load(f)
-            captured_progress.update(persisted["_progress"])
-            return state
-
-        @app.handler
-        def workflow(runner, state):
-            return run_workflow(runner, state, [step])
-
-        runner, source = runner_factory(app, "workflow", {})
-        runner.run()
-        assert captured_progress == {"total": 1, "completed": 0}
-
-    def test_single_handler_run_has_no_progress(self, app, runner_factory):
-        """Calling ``Runner.run()`` directly (without ``run_workflow``) produces no ``_progress`` key in state."""
-
-        @app.handler
-        def simple(runner, state):
-            return {**state, "done": True}
-
-        runner, source = runner_factory(app, "simple", {})
-        result = runner.run()
-        assert "_progress" not in result
-
-
 class TestCallableLogDir:
     """Tests for callable log_dir support in App."""
 
@@ -522,127 +439,80 @@ class TestCallableLogDir:
             Runner(app, channel)
 
 
-class TestWorkflowSkip:
-    """Tests for run_workflow skip / resume behaviour."""
+class TestStatePersistence:
+    """Tests for per-step state persistence in run_workflow."""
 
-    def test_skip_skips_first_n_steps(self, app, runner_factory):
-        """skip=2 with 3 steps executes only the third step."""
-
-        def step_a(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["a"]}
-
-        def step_b(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["b"]}
-
-        def step_c(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["c"]}
-
-        @app.handler
-        def workflow(runner, state):
-            return run_workflow(runner, state, [step_a, step_b, step_c], skip=2)
-
-        runner, _ = runner_factory(app, "workflow", {})
-        result = runner.run()
-        assert result["steps"] == ["c"]
-        assert result["_progress"] == {"total": 3, "completed": 3}
-
-    def test_skip_zero_runs_all(self, app, runner_factory):
-        """skip=0 runs all steps (default behaviour)."""
+    def test_state_persisted_after_each_step(self, app, runner_factory):
+        """Verify _persist_state is called after each step in a multi-step workflow."""
+        persist_calls = []
 
         def step_a(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["a"]}
+            return {**state, "a": 1}
 
         def step_b(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["b"]}
+            return {**state, "b": 2}
 
         @app.handler
         def workflow(runner, state):
-            return run_workflow(runner, state, [step_a, step_b], skip=0)
+            original_persist = runner._persist_state
 
-        runner, _ = runner_factory(app, "workflow", {})
-        result = runner.run()
-        assert result["steps"] == ["a", "b"]
+            def tracking_persist(s):
+                persist_calls.append(dict(s))
+                return original_persist(s)
 
-    def test_skip_preserves_progress_start(self, app, runner_factory):
-        """A capturing step verifies _progress['completed'] starts at skip value."""
-        captured = []
-
-        def capturing(runner, state):
-            captured.append(state["_progress"]["completed"])
-            return state
-
-        @app.handler
-        def workflow(runner, state):
-            return run_workflow(runner, state, [capturing, capturing, capturing], skip=1)
+            runner._persist_state = tracking_persist
+            return run_workflow(runner, state, [step_a, step_b])
 
         runner, _ = runner_factory(app, "workflow", {})
         runner.run()
-        # Only steps[1:] execute, so captured sees completed=1 then completed=2
-        assert captured == [1, 2]
+        # run_workflow persists after each step (2 calls), then Runner.run()
+        # persists the final state (1 call) = 3 total
+        assert len(persist_calls) == 3
+        assert "a" in persist_calls[0]
+        assert "a" in persist_calls[1] and "b" in persist_calls[1]
 
-    def test_resume_skip_in_state_auto_skips(self, app, runner_factory):
-        """_resume_skip in state causes auto-skip when skip param is 0."""
+    def test_final_state_has_no_progress_or_resume_keys(self, app, runner_factory):
+        """Run a multi-step workflow, assert _progress and _resume_skip absent from returned state."""
 
         def step_a(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["a"]}
+            return {**state, "a": 1}
 
         def step_b(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["b"]}
+            return {**state, "b": 2}
 
         @app.handler
         def workflow(runner, state):
             return run_workflow(runner, state, [step_a, step_b])
 
-        runner, _ = runner_factory(app, "workflow", {"_resume_skip": 1})
+        runner, _ = runner_factory(app, "workflow", {})
         result = runner.run()
-        assert result["steps"] == ["b"]
+        assert "_progress" not in result
         assert "_resume_skip" not in result
 
-    def test_resume_skip_consumed_after_first_call(self, app, runner_factory):
-        """_resume_skip is consumed on first run_workflow call; second call runs all."""
+    def test_nested_run_workflow(self, app, runner_factory):
+        """Outer handler calls run_workflow with an inner step that itself calls run_workflow."""
 
-        def step_a(runner, state):
-            return {**state, "first_steps": state.get("first_steps", []) + ["a"]}
+        def inner_step_a(runner, state):
+            return {**state, "inner": state.get("inner", []) + ["a"]}
 
-        def step_b(runner, state):
-            return {**state, "first_steps": state.get("first_steps", []) + ["b"]}
+        def inner_step_b(runner, state):
+            return {**state, "inner": state.get("inner", []) + ["b"]}
 
-        def step_x(runner, state):
-            return {**state, "second_steps": state.get("second_steps", []) + ["x"]}
+        def outer_step_one(runner, state):
+            return run_workflow(runner, state, [inner_step_a, inner_step_b])
 
-        def step_y(runner, state):
-            return {**state, "second_steps": state.get("second_steps", []) + ["y"]}
-
-        @app.handler
-        def workflow(runner, state):
-            state = run_workflow(runner, state, [step_a, step_b])
-            state = run_workflow(runner, state, [step_x, step_y])
-            return state
-
-        runner, _ = runner_factory(app, "workflow", {"_resume_skip": 1})
-        result = runner.run()
-        assert result["first_steps"] == ["b"]
-        assert result["second_steps"] == ["x", "y"]
-
-    def test_explicit_skip_overrides_resume_skip(self, app, runner_factory):
-        """Explicit skip=2 takes precedence over _resume_skip in state."""
-
-        def step_a(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["a"]}
-
-        def step_b(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["b"]}
-
-        def step_c(runner, state):
-            return {**state, "steps": state.get("steps", []) + ["c"]}
+        def outer_step_two(runner, state):
+            return {**state, "outer_done": True}
 
         @app.handler
         def workflow(runner, state):
-            return run_workflow(runner, state, [step_a, step_b, step_c], skip=2)
+            return run_workflow(runner, state, [outer_step_one, outer_step_two])
 
-        runner, _ = runner_factory(app, "workflow", {"_resume_skip": 1})
+        runner, _ = runner_factory(app, "workflow", {})
         result = runner.run()
-        assert result["steps"] == ["c"]
+        assert result["inner"] == ["a", "b"]
+        assert result["outer_done"] is True
+        assert "_progress" not in result
         assert "_resume_skip" not in result
 
 

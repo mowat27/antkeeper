@@ -102,10 +102,7 @@ class Runner:
         1. Merges ``channel.initial_state`` with framework keys ``run_id`` and
            ``workflow_name`` to form the starting state.
         2. Persists that state immediately via ``_persist_state`` so the state
-           file exists on disk before any handler logic runs.  This is important
-           for multi-step workflows that use ``run_workflow``, where ``_progress``
-           is written during step sequencing — the initial persist ensures the
-           file is present even in the event of an early failure.
+           file exists on disk before any handler logic runs.
         3. Resolves any callable values in ``app.env`` by calling each one with
            ``self`` (the Runner).
         4. Invokes the workflow handler inside an ``_app_env`` context so that
@@ -182,8 +179,7 @@ class Runner:
 
         - By ``Runner.run()`` after building the initial state (before any
           handler executes), ensuring the file exists on disk immediately.
-        - By ``run_workflow()`` after initialising ``_progress`` (before the
-          first step runs) and after each individual step completes.
+        - By ``run_workflow()`` after each individual step completes.
         - By ``Runner.run()`` again with the handler's final return value.
 
         Args:

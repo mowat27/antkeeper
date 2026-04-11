@@ -26,13 +26,6 @@ Several keys are reserved for framework use:
 ``workflow_name``
     Injected by ``Runner.run()`` alongside ``run_id``.
 
-``_progress``
-    Injected by ``run_workflow`` when a handler uses the step-sequencing helper.
-    Shape: ``{"total": int, "completed": int}``.  Initialised once before the
-    first step runs and written to the state file via ``Runner._persist_state``
-    so that external observers can poll progress even while the first step is
-    still executing.  Updated (and persisted again) after each step completes.
-
 Typical usage::
 
     from antkeeper.core import App, Runner
