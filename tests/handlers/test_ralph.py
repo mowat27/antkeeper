@@ -67,28 +67,6 @@ def test_pass_after_retries(runner_factory):
     assert result["count"] == 3
 
 
-def test_original_prompt_restored(runner_factory):
-    """Original prompt is restored in state even if the handler modifies it."""
-    def _modify_prompt(runner, state):
-        return {**state, "prompt": "modified by handler"}
-
-    handler = ralph(_modify_prompt, validator=_always_pass)
-    runner, channel = runner_factory()
-    result = handler(runner, {"prompt": "original"})
-    assert result["prompt"] == "original"
-
-
-def test_custom_prompt_key(runner_factory):
-    """A non-default ``prompt_key`` is restored correctly after a successful run."""
-    def _modify_instruction(runner, state):
-        return {**state, "instruction": "modified"}
-
-    handler = ralph(_modify_instruction, validator=_always_pass, prompt_key="instruction")
-    runner, channel = runner_factory()
-    result = handler(runner, {"instruction": "original instruction"})
-    assert result["instruction"] == "original instruction"
-
-
 # ---------------------------------------------------------------------------
 # Retry exhaustion
 # ---------------------------------------------------------------------------
@@ -216,27 +194,6 @@ def test_progress_log_contains_feedback(runner_factory):
     assert "specific feedback message" in log
 
 
-def test_retry_prompt_augmented(runner_factory):
-    """On retry the prompt is augmented with prior-attempts context from the log."""
-    seen_prompts = []
-
-    def _capture(runner, state):
-        seen_prompts.append(state.get("prompt"))
-        return {**state, "n": len(seen_prompts)}
-
-    def _fail_first(state):
-        if state.get("n", 0) >= 2:
-            return ValidationResult(success=True, feedback="")
-        return ValidationResult(success=False, feedback="need more tries")
-
-    handler = ralph(_capture, validator=_fail_first, label="augtest")
-    runner, channel = runner_factory()
-    handler(runner, {"prompt": "original prompt"})
-    assert seen_prompts[0] == "original prompt"
-    assert "prior_attempts" in seen_prompts[1]
-    assert "original prompt" in seen_prompts[1]
-
-
 # ---------------------------------------------------------------------------
 # Label
 # ---------------------------------------------------------------------------
@@ -308,3 +265,151 @@ def test_bash_validator_error_propagates(runner_factory, tmp_path):
     runner, channel = runner_factory()
     with pytest.raises(RuntimeError):
         handler(runner, {})
+
+
+# ---------------------------------------------------------------------------
+# Learnings file
+# ---------------------------------------------------------------------------
+
+
+def test_learnings_file_written_on_failure(runner_factory, tmp_path):
+    """Learnings file is created with labelled heading on validation failure."""
+    call_count = {"n": 0}
+
+    def _count(runner, state):
+        call_count["n"] += 1
+        return {**state, "n": call_count["n"]}
+
+    def _fail_then_pass(state):
+        if state.get("n", 0) >= 2:
+            return ValidationResult(success=True, feedback="")
+        return ValidationResult(success=False, feedback="specific failure feedback")
+
+    handler = ralph(
+        _count,
+        validator=_fail_then_pass,
+        label="test-learn",
+        learnings_file="$dir/learnings.md",
+    )
+    runner, channel = runner_factory()
+    handler(runner, {"dir": str(tmp_path)})
+
+    lf = tmp_path / "learnings.md"
+    assert lf.exists()
+    content = lf.read_text()
+    assert "## test-learn" in content
+    assert "Attempt 1/" in content
+    assert "specific failure feedback" in content
+    assert "---" in content
+
+
+def test_learnings_file_not_written_on_success(runner_factory, tmp_path):
+    """Learnings file is not created when validator passes on first attempt."""
+    handler = ralph(
+        _identity,
+        validator=_always_pass,
+        learnings_file="$dir/learnings.md",
+    )
+    runner, channel = runner_factory()
+    handler(runner, {"dir": str(tmp_path)})
+    assert not (tmp_path / "learnings.md").exists()
+
+
+def test_learnings_file_appends_multiple_failures(runner_factory, tmp_path):
+    """Multiple failures append multiple labelled entries to the learnings file."""
+    call_count = {"n": 0}
+
+    def _count(runner, state):
+        call_count["n"] += 1
+        return {**state, "n": call_count["n"]}
+
+    def _fail_twice_then_pass(state):
+        if state.get("n", 0) >= 3:
+            return ValidationResult(success=True, feedback="")
+        return ValidationResult(success=False, feedback=f"failure {state.get('n')}")
+
+    handler = ralph(
+        _count,
+        validator=_fail_twice_then_pass,
+        max_retries=2,
+        label="multi-fail",
+        learnings_file="$dir/learnings.md",
+    )
+    runner, channel = runner_factory()
+    handler(runner, {"dir": str(tmp_path)})
+
+    content = (tmp_path / "learnings.md").read_text()
+    assert "Attempt 1/" in content
+    assert "Attempt 2/" in content
+
+
+def test_learnings_file_variable_interpolation(runner_factory, tmp_path):
+    """Learnings file path interpolates multiple $vars from state."""
+    call_count = {"n": 0}
+
+    def _count(runner, state):
+        call_count["n"] += 1
+        return {**state, "n": call_count["n"], "base": state["base"], "slug": state["slug"]}
+
+    def _fail_then_pass(state):
+        if state.get("n", 0) >= 2:
+            return ValidationResult(success=True, feedback="")
+        return ValidationResult(success=False, feedback="retry needed")
+
+    handler = ralph(
+        _count,
+        validator=_fail_then_pass,
+        learnings_file="$base/work/$slug/learnings.md",
+    )
+    runner, channel = runner_factory()
+    handler(runner, {"base": str(tmp_path), "slug": "my-run"})
+
+    expected = tmp_path / "work" / "my-run" / "learnings.md"
+    assert expected.exists()
+
+
+def test_learnings_file_none_default(runner_factory, tmp_path):
+    """No learnings file is created when learnings_file is omitted."""
+    call_count = {"n": 0}
+
+    def _count(runner, state):
+        call_count["n"] += 1
+        return {**state, "n": call_count["n"]}
+
+    def _fail_then_pass(state):
+        if state.get("n", 0) >= 2:
+            return ValidationResult(success=True, feedback="")
+        return ValidationResult(success=False, feedback="no learnings file")
+
+    handler = ralph(_count, validator=_fail_then_pass)
+    runner, channel = runner_factory()
+    handler(runner, {})
+
+    md_files = list(tmp_path.glob("**/*.md"))
+    assert md_files == []
+
+
+def test_learnings_file_written_on_exhaustion(runner_factory, tmp_path):
+    """Learnings entries are written for all failed attempts before WorkflowFailedError."""
+    handler = ralph(
+        _identity,
+        validator=_always_fail,
+        max_retries=1,
+        label="exhaust-test",
+        learnings_file="$dir/learnings.md",
+    )
+    runner, channel = runner_factory()
+    with pytest.raises(WorkflowFailedError):
+        handler(runner, {"dir": str(tmp_path)})
+
+    content = (tmp_path / "learnings.md").read_text()
+    assert "Attempt 1/" in content
+    assert "Attempt 2/" in content
+
+
+def test_success_returns_result_state_directly(runner_factory):
+    """Returned state is exactly what the handler produced — no prompt restoration."""
+    handler = ralph(_add_result, validator=_always_pass)
+    runner, channel = runner_factory()
+    result = handler(runner, {})
+    assert result["result"] == "ok"
