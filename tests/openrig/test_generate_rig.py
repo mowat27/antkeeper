@@ -157,6 +157,10 @@ class TestGenerateRig:
         assert skill.startswith("---\nname: sdlc\n") and "rig workflow instantiate \"$PWD/.openrig/workflows/sdlc.yaml\"" in skill
         role = (tmp_path / ".openrig/agents/count_words/guidance/role.md").read_text()
         assert "`run_id` to the workflow instance id" in role and "`workflow_name`" in role
+        assert "rig queue show <qitem-id> --full" in role and '--result-note \'{"summary"' in role
+        assert ".openrig/agents/specify/guidance/role.md" in workflow["steps"][0]["objective"]
+        generated = [(tmp_path / path).read_text() for path in result.files]
+        assert not any(".antkeeper/state" in text for text in generated)
         assert (tmp_path / "CULTURE.md").is_file()
         assert (tmp_path / ".openrig/shared/agent.yaml").is_file() and result.shared_copied
 
