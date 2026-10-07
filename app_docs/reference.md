@@ -37,8 +37,11 @@ src/antkeeper/
 │   ├── __init__.py     # Shared utilities: run_workflow_background()
 │   ├── webhook.py      # POST /webhook endpoint
 │   └── slack_events.py # POST /slack_event endpoint
+├── openrig/            # OpenRig rig generation (antkeeper generate-rig)
+│   ├── introspect.py   # Handlers module -> steps and workflows
+│   └── generator.py    # Steps and workflows -> rig.yaml, agents, skills, workflow specs
 ├── cli.py              # Click-based CLI entry point
-├── loader.py           # Shared app-loading utility (used by CLI and server)
+├── loader.py           # Shared module/app loading (used by CLI, server and generate-rig)
 └── server.py           # Server orchestrator (delegates to http/)
 ```
 
@@ -397,6 +400,28 @@ Start FastAPI webhook server:
 - `--reload` — enable auto-reload on code changes
 - `--agents-file <path>` — Python file exporting `app` (default: `handlers.py`)
 - For Slack: set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` via `.env` or environment
+
+### antkeeper generate-rig
+
+Generate an [OpenRig](https://www.openrig.dev) rig that runs the handlers file's workflows with one agent seat per step:
+- `antkeeper generate-rig [handlers-file]` — handlers file to translate (default: `handlers.py`)
+- `--name <rig>` — rig name (default: the output directory name)
+- `--output-dir <path>` — project root to write into (default: current directory); seats work in this directory
+- `--force` — overwrite files from a previous generation (otherwise existing files are never overwritten)
+
+What it writes:
+- `rig.yaml` — pod `orch` with the orchestrator seat `lead`, and pod `steps` with one seat per antkeeper step, named after the step. A `cc_handler` `model` becomes the seat's model. OpenRig's managed instructions go to `CLAUDE.local.md`.
+- `CULTURE.md` — how work and state move through the rig.
+- `.openrig/agents/<step>/` and `.openrig/agents/orchestrator/` — agent specs with role and startup guidance. Each step's role describes how to perform it: the `cc_handler` prompt and `state_updates`, a `ralph` retry loop and its validator, or a hand-written handler's source.
+- `.openrig/agents/orchestrator/skills/<workflow>/` — one skill per registered handler (name hyphenated, e.g. `sdlc_iso` → `/sdlc-iso`). A skill is skipped if it would shadow a slash command that a step runs or that the project defines.
+- `.openrig/workflows/<workflow>.yaml` — one OpenRig workflow spec per registered handler. Steps come from `run_workflow(...)` calls, which are resolved statically, and from direct `step(runner, state)` calls. Nested workflows are flattened. Every workflow ends at the orchestrator's `close` step, and a failed step routes there too.
+- `.openrig/shared/` — OpenRig's shared agent pool, copied from the installed `rig` CLI if the project does not already have one.
+
+Running a workflow: `rig up rig.yaml`, open the orchestrator (`tmux attach -t orch-lead@<rig>`) and type e.g. `/sdlc add dark mode`. The orchestrator starts a workflow instance, and each step seat performs its step and hands off with `rig workflow project`. Antkeeper's state dict lives in `.antkeeper/state/<workflow-instance-id>.json`; the first step creates it as `{"prompt": <request>}`.
+
+`rig workflow` commands resolve a relative spec path against the OpenRig daemon, not your shell. Pass absolute paths, for example `rig workflow validate "$PWD/.openrig/workflows/sdlc.yaml"`; the generated instructions already do.
+
+Limits: a handler whose `run_workflow` steps cannot be resolved statically (for example, a list built from state) is skipped with a note, and the rest of the rig is still generated. Logic in a workflow handler beyond running its steps (for example the worktree setup in `sdlc_iso`) is shown to the orchestrator but is not modelled as seats. Seats run under OpenRig's default permission posture. Only the `rig` coordination commands are allowlisted, so a step that runs other shell commands asks for approval unless you attach a `permission_policy`.
 
 ### Justfile Recipes
 

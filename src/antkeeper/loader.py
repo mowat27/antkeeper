@@ -1,6 +1,28 @@
 """Shared app-loading utility, used by CLI and server."""
 
 import importlib.util
+from types import ModuleType
+
+
+def load_module(path: str) -> ModuleType:
+    """Dynamically import a handlers file as a module.
+
+    Args:
+        path: File path to the Python module.
+
+    Returns:
+        The executed module.
+
+    Raises:
+        FileNotFoundError: If the file cannot be found or the module spec
+            cannot be created.
+    """
+    spec = importlib.util.spec_from_file_location("agents", path)
+    if spec is None or spec.loader is None:
+        raise FileNotFoundError(path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_app(path: str):
@@ -20,9 +42,4 @@ def load_app(path: str):
             cannot be created.
         AttributeError: If the loaded module does not have an 'app' attribute.
     """
-    spec = importlib.util.spec_from_file_location("agents", path)
-    if spec is None or spec.loader is None:
-        raise FileNotFoundError(path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.app
+    return load_module(path).app

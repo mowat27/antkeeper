@@ -4,7 +4,7 @@ This directory contains policy and pattern documentation for the Antkeeper workf
 
 ## Files
 
-- **reference.md** - Comprehensive reference guide covering project structure, core concepts in detail, writing handlers (decorator pattern, cc_handler factory, and the ralph retry-with-validation wrapper including the `learnings_file` parameter for shared markdown feedback files), LLM integration, git utilities, data flow for all channels (CLI, API, Slack, Programmatic), logging and state persistence, CLI commands, and codebase navigation. This is where readers go after the main README for detailed technical reference.
+- **reference.md** - Comprehensive reference guide covering project structure, core concepts in detail, OpenRig rig generation (`antkeeper generate-rig`), writing handlers (decorator pattern, cc_handler factory, and the ralph retry-with-validation wrapper including the `learnings_file` parameter for shared markdown feedback files), LLM integration, git utilities, data flow for all channels (CLI, API, Slack, Programmatic), logging and state persistence, CLI commands, and codebase navigation. This is where readers go after the main README for detailed technical reference.
 
 - **releasing.md** - Packaging, dependency management, and PyPI release process. Covers core dependencies (all runtime deps including OTel packages), public API exports (including `Handler` and `ProgrammaticChannel`), entry points (CLI script and Python module), environment variables (`ANTKEEPER_HANDLERS_FILE`), package metadata, build system (uv_build), release checklist, publishing to PyPI, post-release verification, and version numbering strategy.
 
