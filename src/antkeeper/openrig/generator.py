@@ -430,6 +430,8 @@ inside the workflow runtime. There is no state file.
 
 - Do your own step and only your own step. Workflow order belongs to the runtime.
 - Handoffs are durable: use `rig workflow project`, not chat, to move work.
+- Use `rig queue` by default for anything another seat must act on or reply to;
+  use `rig send` only for trivial notes that need no reply.
 - Run `rig` commands on their own. They are allowlisted, but piping their output
   into `python3`, `jq` or other programs triggers an approval prompt that stalls
   the workflow. Read JSON output directly.

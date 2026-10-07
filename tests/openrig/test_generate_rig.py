@@ -161,7 +161,7 @@ class TestGenerateRig:
         assert ".openrig/agents/specify/guidance/role.md" in workflow["steps"][0]["objective"]
         generated = [(tmp_path / path).read_text() for path in result.files]
         assert not any(".antkeeper/state" in text for text in generated)
-        assert (tmp_path / "CULTURE.md").is_file()
+        assert (tmp_path / "CULTURE.md").read_text().count("Use `rig queue` by default") == 1
         assert (tmp_path / ".openrig/shared/agent.yaml").is_file() and result.shared_copied
 
     def test_permission_policy_is_opt_in(self, tmp_path):
