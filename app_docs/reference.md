@@ -408,6 +408,7 @@ Generate an [OpenRig](https://www.openrig.dev) rig that runs the handlers file's
 - `--name <rig>` — rig name (default: the output directory name)
 - `--output-dir <path>` — project root to write into (default: current directory); seats work in this directory
 - `--force` — overwrite files from a previous generation (otherwise existing files are never overwritten)
+- `--permission-policy <policy>` — OpenRig permission policy written to `rig.yaml`, e.g. `builtin:open` (no prompts except catastrophic-destructive acts) or `builtin:yolo` (Claude runs with `--dangerously-skip-permissions`, like antkeeper's `cc_handler` default). Without it, seats run at OpenRig's default floor and may stop for approval.
 
 What it writes:
 - `rig.yaml` — pod `orch` with the orchestrator seat `lead`, and pod `steps` with one seat per antkeeper step, named after the step. A `cc_handler` `model` becomes the seat's model. OpenRig's managed instructions go to `CLAUDE.local.md`.
@@ -421,7 +422,7 @@ Running a workflow: `rig up rig.yaml`, open the orchestrator (`tmux attach -t or
 
 `rig workflow` commands resolve a relative spec path against the OpenRig daemon, not your shell. Pass absolute paths, for example `rig workflow validate "$PWD/.openrig/workflows/sdlc.yaml"`; the generated instructions already do.
 
-Limits: a handler whose `run_workflow` steps cannot be resolved statically (for example, a list built from state) is skipped with a note, and the rest of the rig is still generated. Logic in a workflow handler beyond running its steps (for example the worktree setup in `sdlc_iso`) is shown to the orchestrator but is not modelled as seats. Seats run under OpenRig's default permission posture. Only the `rig` coordination commands are allowlisted, so a step that runs other shell commands asks for approval unless you attach a `permission_policy`.
+Limits: a handler whose `run_workflow` steps cannot be resolved statically (for example, a list built from state) is skipped with a note, and the rest of the rig is still generated. Logic in a workflow handler beyond running its steps (for example the worktree setup in `sdlc_iso`) is shown to the orchestrator but is not modelled as seats. Seats run under OpenRig's default permission posture. Only the `rig` coordination commands are allowlisted, so a step that runs other shell commands asks for approval unless you pass `--permission-policy`.
 
 ### Justfile Recipes
 

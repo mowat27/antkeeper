@@ -96,6 +96,7 @@ def generate_rig(
     rig_name: str | None = None,
     force: bool = False,
     shared_source: Path | None = None,
+    permission_policy: str | None = None,
 ) -> GeneratedRig:
     """Generate an OpenRig rig for the handlers file into ``output_dir``.
 
@@ -108,6 +109,9 @@ def generate_rig(
         shared_source: OpenRig's shared agent spec directory, copied to
             ``.openrig/shared`` when the project does not have one. Defaults to
             the copy shipped with the installed ``rig`` CLI.
+        permission_policy: OpenRig permission policy for the rig, e.g.
+            ``builtin:open``. Omitted from ``rig.yaml`` when ``None``, which
+            leaves OpenRig's default floor.
 
     Returns:
         A summary of what was generated.
@@ -129,7 +133,7 @@ def generate_rig(
     name = _rig_name(rig_name or out.name)
     handlers_path = Path(handlers_file).resolve()
     handlers_ref = handlers_path.relative_to(out).as_posix() if handlers_path.is_relative_to(out) else handlers_path.name
-    rendered = _Renderer(spec, name, handlers_ref, _taken_commands(spec, out))
+    rendered = _Renderer(spec, name, handlers_ref, _taken_commands(spec, out), permission_policy)
     files = rendered.files()
 
     if not force:
@@ -218,8 +222,16 @@ def _taken_commands(spec: HandlersSpec, out: Path) -> set[str]:
 class _Renderer:
     """Renders every generated file for one rig."""
 
-    def __init__(self, spec: HandlersSpec, rig: str, handlers_ref: str, taken_commands: set[str]) -> None:
+    def __init__(
+        self,
+        spec: HandlersSpec,
+        rig: str,
+        handlers_ref: str,
+        taken_commands: set[str],
+        permission_policy: str | None = None,
+    ) -> None:
         self.spec = spec
+        self.permission_policy = permission_policy
         self.rig = rig
         self.handlers_ref = handlers_ref
         self.lead_session = session(LEAD_POD, LEAD_MEMBER, rig)
@@ -287,6 +299,7 @@ class _Renderer:
             if step.model:
                 member["model"] = step.model
             step_members.append(member)
+        policy = {"permission_policy": self.permission_policy} if self.permission_policy else {}
         return {
             "version": "0.2",
             "name": self.rig,
@@ -295,6 +308,7 @@ class _Renderer:
                 "starts antkeeper workflows; each step runs on its own seat."
             ),
             "culture_file": "CULTURE.md",
+            **policy,
             "managed_blocks": {"claude-code": "CLAUDE.local.md"},
             "pods": [
                 {

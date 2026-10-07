@@ -164,6 +164,14 @@ class TestGenerateRig:
         assert (tmp_path / "CULTURE.md").is_file()
         assert (tmp_path / ".openrig/shared/agent.yaml").is_file() and result.shared_copied
 
+    def test_permission_policy_is_opt_in(self, tmp_path):
+        handlers, shared = _write(tmp_path), _shared(tmp_path)
+        generate_rig(str(handlers), str(tmp_path), shared_source=shared)
+        assert "permission_policy" not in _load(tmp_path / "rig.yaml")
+
+        generate_rig(str(handlers), str(tmp_path), force=True, permission_policy="builtin:open")
+        assert _load(tmp_path / "rig.yaml")["permission_policy"] == "builtin:open"
+
     def test_skips_skills_that_shadow_slash_commands(self, tmp_path):
         (tmp_path / ".claude" / "commands").mkdir(parents=True)
         (tmp_path / ".claude" / "commands" / "partial.md").write_text("project command")
