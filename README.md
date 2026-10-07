@@ -140,6 +140,17 @@ curl -X POST http://localhost:8000/webhook \
 
 For Slack integration (requires your own Slack app), set `SLACK_BOT_TOKEN` and `SLACK_BOT_USER_ID` in a `.env` file and start the server. See [Slack Integration](app_docs/slack.md).
 
+To run the same workflows on [OpenRig](https://www.openrig.dev), with one agent seat per step and an orchestrator seat you talk to, generate a rig from your handlers file:
+
+```bash
+antkeeper generate-rig handlers.py   # writes rig.yaml, CULTURE.md and .openrig/
+rig up rig.yaml
+# then, in the orchestrator seat (tmux attach -t orch-lead@<rig>):
+/sdlc add dark mode
+```
+
+See [antkeeper generate-rig](app_docs/reference.md#antkeeper-generate-rig) for what is generated and its limits.
+
 ## Programmatic Usage
 
 Run workflows directly from Python without a CLI or server:

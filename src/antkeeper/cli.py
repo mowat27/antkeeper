@@ -236,6 +236,40 @@ def init(path):
     print("  SLACK_COOLDOWN_SECONDS   Slack debounce cooldown in seconds (default: 30)")
 
 
+@cli.command("generate-rig")
+@click.argument("handlers_file", default="handlers.py")
+@click.option("--name", "rig_name", default=None, help="Rig name (default: output directory name).")
+@click.option("--output-dir", default=".", help="Project root to write the rig into; seats work here.")
+@click.option("--force", is_flag=True, help="Overwrite files from a previous generation.")
+def generate_rig_command(handlers_file, rig_name, output_dir, force):
+    """Generate an OpenRig rig from an antkeeper handlers file.
+
+    Writes ``rig.yaml``, ``CULTURE.md``, one agent per step plus an
+    orchestrator under ``.openrig/agents``, and one workflow spec per
+    registered handler under ``.openrig/workflows``.
+    """
+    from antkeeper.openrig import GenerationError, generate_rig
+
+    try:
+        result = generate_rig(handlers_file, output_dir, rig_name=rig_name, force=force)
+    except GenerationError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    print(f"Generated OpenRig rig '{result.rig_name}' from {handlers_file} ({len(result.files)} files).")
+    if result.shared_copied:
+        print("Copied OpenRig's shared agent pool to .openrig/shared.")
+    for warning in result.warnings:
+        print(f"Note: {warning}")
+    print()
+    print("Start the rig:")
+    print("  rig up rig.yaml")
+    print()
+    print(f"Then open the orchestrator ({result.lead_session}) and run a workflow:")
+    for workflow, skill in result.launchers.items():
+        print(f"  /{skill} <prompt>    # {workflow}")
+
+
 main = cli
 
 
