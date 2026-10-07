@@ -408,7 +408,7 @@ Generate an [OpenRig](https://www.openrig.dev) rig that runs the handlers file's
 - `--name <rig>` — rig name (default: the output directory name)
 - `--output-dir <path>` — project root to write into (default: current directory); seats work in this directory
 - `--force` — overwrite files from a previous generation (otherwise existing files are never overwritten)
-- `--permission-policy <policy>` — OpenRig permission policy written to `rig.yaml`, e.g. `builtin:open` (no prompts except catastrophic-destructive acts) or `builtin:yolo` (Claude runs with `--dangerously-skip-permissions`, like antkeeper's `cc_handler` default). Without it, seats run at OpenRig's default floor and may stop for approval.
+- `--permission-policy <policy>` — OpenRig permission policy written to `rig.yaml`, e.g. `builtin:open` (no prompts except catastrophic-destructive acts) or `builtin:yolo` (Claude runs with `--dangerously-skip-permissions`, like antkeeper's `cc_handler` default). Without it, seats run at OpenRig's default floor and may stop for approval. Claude's auto mode is not a permission policy; to launch seats in it, run `rig seat set-permissions <seat> --mode auto --reason "..."` once per seat. The choice persists across relaunches.
 
 What it writes:
 - `rig.yaml` — pod `orch` with the orchestrator seat `lead`, and pod `steps` with one seat per antkeeper step, named after the step. A `cc_handler` `model` becomes the seat's model. OpenRig's managed instructions go to `CLAUDE.local.md`.
