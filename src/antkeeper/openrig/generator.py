@@ -50,6 +50,15 @@ _SHARED_RUNTIME_RESOURCES = [
 # workflow motion from stalling on permission prompts.
 _RIG_SUBCOMMANDS = ["whoami", "queue", "workflow", "capture", "send", "ps", "transcript"]
 _RIG_PERMISSIONS = "runtime/claude-rig-permissions.fragment.json"
+# How a step seat builds workflow state, mirroring antkeeper's Runner, which
+# starts every run from the initial state plus ``run_id`` and ``workflow_name``.
+_INITIAL_STATE_RULE = """\
+- If the file does not exist, this is the first step. Create it from the root
+  objective in the packet: use a JSON object as it is, otherwise start from
+  `{"prompt": "<root objective>"}`.
+- Always set `run_id` to the workflow instance id and `workflow_name` to the
+  workflow id (from the packet header `Workflow entry/handoff: <workflow>@<version>`),
+  as antkeeper does. Add them if an existing state file lacks them."""
 _ORCHESTRATOR_SKILLS = ["orchestration-team", "verification-before-completion"]
 _STEP_SKILLS = ["systematic-debugging", "verification-before-completion"]
 
@@ -328,7 +337,6 @@ class _Renderer:
                     "exit failed with the reason if the step cannot be completed."
                 ),
                 "allowed_exits": ["handoff", "waiting", "failed"],
-                "next_hop": {"on": {"failed": CLOSE_STEP}},
             }
             for index, (step_id, step) in enumerate(zip(step_ids, steps), start=1)
         ]
@@ -337,7 +345,7 @@ class _Renderer:
             "actor_role": ORCHESTRATOR,
             "objective": (
                 f"Report the outcome of `{wf.name}` to the user from {STATE_DIR}/<workflow-instance-id>.json "
-                "and the prior step note, then exit done if every step succeeded or failed if one failed."
+                "and the prior step note, then exit done."
             ),
             "allowed_exits": ["done", "failed"],
             "next_hop": {"mode": "forbid"},
@@ -377,15 +385,17 @@ step has its own seat, named after the step, and the orchestrator
   `{WORKFLOWS_DIR}/<workflow>.yaml`. The runtime hands a packet to the first step seat.
 - Each step seat performs its step, then runs `rig workflow project`, which closes
   its packet and hands the next one to the next step.
-- Every workflow ends at the orchestrator's `{CLOSE_STEP}` step. A failed step goes
-  straight to `{CLOSE_STEP}`, so the orchestrator always reports back.
+- Every workflow ends at the orchestrator's `{CLOSE_STEP}` step, which reports back.
+- A step that fails exits `failed`. The runtime raises a workflow exception to the
+  orchestrator, and once the cause is fixed `rig workflow resume` re-runs that
+  step. Completed steps never re-run.
 
 ## Workflow state
 
 Antkeeper threads a state object through the steps. Here it is a JSON file,
 `{STATE_DIR}/<workflow-instance-id>.json`:
 
-- The first step creates it as `{{"prompt": "<root objective>"}}`.
+{_INITIAL_STATE_RULE}
 - Every step reads it, does its work, and writes it back with its outputs merged
   in. A step never drops keys written by earlier steps.
 - The orchestrator reads the final state when it closes the workflow.
@@ -429,7 +439,10 @@ The user starts a workflow with its skill (for example
 `/{next(iter(self.launchers.values()), "<workflow>")} add dark mode`) or by asking in words. In both cases:
 
 1. The prompt is the user's request. If it names an existing file, use the file's
-   contents, as `antkeeper run` does.
+   contents, as `antkeeper run` does. To seed other state keys, as
+   `antkeeper run --initial-state` does, pass a JSON object as the root objective
+   instead, for example `{{"prompt": "...", "spec_file": "specs/x.md"}}`. A
+   single-step workflow needs this when its step reads keys other than `prompt`.
 2. Instantiate the workflow, passing the prompt as the root objective:
 
    ```bash
@@ -450,8 +463,8 @@ The user starts a workflow with its skill (for example
 Every workflow ends with a `{CLOSE_STEP}` packet addressed to you. When it arrives:
 
 1. Claim it and read `{STATE_DIR}/<workflow-instance-id>.json` and the prior step note.
-2. Report to the user: which steps ran, the final state keys that matter (for
-   example a PR URL or branch name), and any failure with its reason.
+2. Report to the user: which steps ran, and the final state keys that matter (for
+   example a PR URL or branch name).
 3. Close the packet:
 
    ```bash
@@ -459,7 +472,18 @@ Every workflow ends with a `{CLOSE_STEP}` packet addressed to you. When it arriv
      --exit done --actor-session {self.lead_session} --result-note "<one-line outcome>"
    ```
 
-   Use `--exit failed` instead when a step failed.
+## When a step fails
+
+A failed step raises a `WORKFLOW EXCEPTION` queue item to you, and the instance
+stops at that step. Read the reason, `rig workflow trace <id>` and the state file.
+Then fix the cause, or ask the user to decide. Re-run the failed step with:
+
+```bash
+rig workflow resume <id> --actor-session {self.lead_session} --decision "<what changed>"
+```
+
+Completed steps never re-run. If the run should not continue, tell the user and
+leave the instance failed.
 
 ## Workflows
 
@@ -479,8 +503,6 @@ Every workflow ends with a `{CLOSE_STEP}` packet addressed to you. When it arriv
 - If a step seat stalls, look at it (`rig capture <seat>`) and unblock it. A seat
   waiting on a permission prompt or a question needs the user's decision; ask
   for it plainly.
-- After fixing the cause of a failed instance, `rig workflow resume <id>` re-runs it
-  from the failed step.
 """
 
     def orchestrator_context(self) -> str:
@@ -582,8 +604,8 @@ Work arrives as a queue packet from the OpenRig workflow runtime.
    `rig queue show <qitem-id> --full`. Note the `Workflow instance` id and, on the
    first step, the `Root objective`.
 2. Claim it: `rig queue claim <qitem-id>`.
-3. Load workflow state from `{STATE_DIR}/<workflow-instance-id>.json`. If the file
-   does not exist, this is the first step: start from `{{"prompt": "<root objective>"}}`.
+3. Load workflow state from `{STATE_DIR}/<workflow-instance-id>.json`.
+{_indent(_INITIAL_STATE_RULE, "   ")}
 4. Perform the step above in this repository.
 5. Merge the step's outputs into the state and write the whole object back to the
    same file as JSON. Keep every key written by earlier steps. Use your file
@@ -598,9 +620,10 @@ Work arrives as a queue packet from the OpenRig workflow runtime.
    ```
 
 If the step cannot be completed, run the same command with `--exit failed` and a
-result note that gives the reason. The runtime routes the failure to the
-orchestrator (`{self.lead_session}`). Do not perform other steps, and do not start
-work without a packet.
+result note that gives the reason. The runtime raises a workflow exception to the
+orchestrator (`{self.lead_session}`), which re-runs this step with `rig workflow
+resume` once the cause is fixed. Do not perform other steps, and do not start work
+without a packet.
 """
 
     def step_context(self, step: Step) -> str:
@@ -667,6 +690,11 @@ def _unique_ids(ids: list[str]) -> list[str]:
         counts[step_id] = counts.get(step_id, 0) + 1
         unique.append(step_id if counts[step_id] == 1 else f"{step_id}-{counts[step_id]}")
     return unique
+
+
+def _indent(text: str, prefix: str) -> str:
+    """Indent every line of text, e.g. to nest a list under a numbered step."""
+    return "\n".join(prefix + line for line in text.splitlines())
 
 
 def _cell(text: str) -> str:

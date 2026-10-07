@@ -145,7 +145,8 @@ class TestGenerateRig:
 
         workflow = _load(tmp_path / ".openrig/workflows/sdlc.yaml")["workflow"]
         assert [s["id"] for s in workflow["steps"]] == ["specify", "branch", "implement", "close"]
-        assert workflow["steps"][0]["next_hop"] == {"on": {"failed": "close"}}
+        assert "next_hop" not in workflow["steps"][0]  # a failure stays on its step, so resume re-runs it
+        assert workflow["exception_routing"]["orchestrator_role"] == "orchestrator"
         assert workflow["roles"]["specify"]["preferred_targets"] == ["steps-specify@my-rig"]
         assert workflow["roles"]["orchestrator"]["preferred_targets"] == ["orch-lead@my-rig"]
 
@@ -154,7 +155,8 @@ class TestGenerateRig:
         assert "rig-permissions" in orchestrator["profiles"]["default"]["uses"]["runtime_resources"]
         skill = (tmp_path / ".openrig/agents/orchestrator/skills/sdlc/SKILL.md").read_text()
         assert skill.startswith("---\nname: sdlc\n") and "rig workflow instantiate \"$PWD/.openrig/workflows/sdlc.yaml\"" in skill
-        assert (tmp_path / ".openrig/agents/count_words/guidance/role.md").is_file()
+        role = (tmp_path / ".openrig/agents/count_words/guidance/role.md").read_text()
+        assert "`run_id` to the workflow instance id" in role and "`workflow_name`" in role
         assert (tmp_path / "CULTURE.md").is_file()
         assert (tmp_path / ".openrig/shared/agent.yaml").is_file() and result.shared_copied
 
