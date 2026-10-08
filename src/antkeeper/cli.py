@@ -241,7 +241,12 @@ def init(path):
 @click.option("--name", "rig_name", default=None, help="Rig name (default: output directory name).")
 @click.option("--output-dir", default=".", help="Project root to write the rig into; seats work here.")
 @click.option("--force", is_flag=True, help="Overwrite files from a previous generation.")
-def generate_rig_command(handlers_file, rig_name, output_dir, force):
+@click.option(
+    "--permission-policy",
+    default=None,
+    help="OpenRig permission policy for the rig, e.g. builtin:open or builtin:yolo (default: OpenRig's floor).",
+)
+def generate_rig_command(handlers_file, rig_name, output_dir, force, permission_policy):
     """Generate an OpenRig rig from an antkeeper handlers file.
 
     Writes ``rig.yaml``, ``CULTURE.md``, one agent per step plus an
@@ -251,7 +256,9 @@ def generate_rig_command(handlers_file, rig_name, output_dir, force):
     from antkeeper.openrig import GenerationError, generate_rig
 
     try:
-        result = generate_rig(handlers_file, output_dir, rig_name=rig_name, force=force)
+        result = generate_rig(
+            handlers_file, output_dir, rig_name=rig_name, force=force, permission_policy=permission_policy
+        )
     except GenerationError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
