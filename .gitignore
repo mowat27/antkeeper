@@ -12,6 +12,7 @@ wheels/
 tmp/
 .claude/settings.local.json
 agents/
+!.openrig/agents/
 trees/
 .antkeeper/
 .env
