@@ -12,6 +12,23 @@ wheels/
 tmp/
 .claude/settings.local.json
 agents/
+!.openrig/agents/
 trees/
 .antkeeper/
 .env
+
+# OpenRig runtime files. OpenRig writes these when it launches agent seats in
+# this checkout; they are projections, not source (see OpenRig's
+# project-workspace reference). Rig specs written by people are not ignored.
+CLAUDE.local.md
+.mcp.json
+.claude/plugins/
+.claude/skills/agent-browser/
+.claude/skills/development-team/
+.claude/skills/dogfood/
+.claude/skills/systematic-debugging/
+.claude/skills/test-driven-development/
+.claude/skills/verification-before-completion/
+.openrig/hooks/
+.openrig/context-collector.cjs
+.openrig/skill-loadouts/
